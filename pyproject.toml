@@ -1,0 +1,68 @@
+[project]
+name = "agent-runtime"
+version = "0.1.0"
+description = "An agent runtime where intelligence and authority are separate capabilities."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "anthropic>=0.40",
+    "openai>=1.55",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "mypy>=1.13",
+    "respx>=0.21",
+]
+
+[project.scripts]
+privileged-ctl = "privileged.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app", "privileged"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:app.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "S", "ASYNC"]
+ignore = ["S101"]  # assert is fine in tests and internal invariants
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S108"]
+"scripts/*" = ["S105", "S106"]
+# `Depends(...)` in a default argument is the FastAPI idiom, not a bug.
+"app/api/*" = ["B008"]
+"app/main.py" = ["B008"]
+# A `timeout` argument on the command runners is deliberate: it is part of the
+# injectable interface, so a fake runner can assert on it.
+"app/tools/testing.py" = ["ASYNC109"]
+"privileged/executor.py" = ["ASYNC109"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["app", "privileged"]
+strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
