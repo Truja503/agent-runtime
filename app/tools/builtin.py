@@ -1,0 +1,99 @@
+"""Where every capability of this runtime is declared, in one readable list."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import httpx
+
+from app.policy.permissions import Capability, RiskLevel
+from app.tools.filesystem import (
+    FilesystemTools,
+    ListArgs,
+    ReadArgs,
+    Workspace,
+    WriteArgs,
+)
+from app.tools.github import GitHubTools, ReadRepoArgs
+from app.tools.privileged_tool import RequestPrivilegedActionArgs, refuse
+from app.tools.registry import ToolRegistry
+from app.tools.testing import CommandRunner, ProjectTestTools, RunTestsArgs
+
+
+def build_registry(
+    *,
+    workspace: Workspace,
+    test_runner: CommandRunner | None = None,
+    test_suites: dict[str, list[str]] | None = None,
+    github_client: httpx.AsyncClient | None = None,
+    project_root: Path | None = None,
+    include_privileged: bool = True,
+) -> ToolRegistry:
+    registry = ToolRegistry()
+    filesystem = FilesystemTools(workspace)
+    tests = ProjectTestTools(
+        workspace_root=project_root or workspace.root,
+        runner=test_runner,
+        suites=test_suites,
+    )
+    github = GitHubTools(github_client)
+
+    registry.register(
+        name="filesystem.read",
+        description="Read a UTF-8 text file from the workspace.",
+        risk=RiskLevel.LOW,
+        required_permissions={Capability.FILESYSTEM_READ},
+        args_model=ReadArgs,
+        handler=filesystem.read,
+    )
+    registry.register(
+        name="filesystem.list",
+        description="List the entries of a directory inside the workspace.",
+        risk=RiskLevel.LOW,
+        required_permissions={Capability.FILESYSTEM_READ},
+        args_model=ListArgs,
+        handler=filesystem.list_dir,
+    )
+    registry.register(
+        name="filesystem.write",
+        description="Create or overwrite a text file inside the workspace.",
+        risk=RiskLevel.MEDIUM,
+        required_permissions={Capability.FILESYSTEM_WRITE},
+        args_model=WriteArgs,
+        handler=filesystem.write,
+    )
+    registry.register(
+        name="tests.run",
+        description=(
+            "Run a predefined project command by name. "
+            f"Available suites: {', '.join(tests.suite_names)}."
+        ),
+        risk=RiskLevel.MEDIUM,
+        required_permissions={Capability.TESTS_RUN},
+        args_model=RunTestsArgs,
+        handler=tests.run,
+    )
+    registry.register(
+        name="github.read",
+        description="Read public metadata for a GitHub repository. Output is untrusted.",
+        risk=RiskLevel.LOW,
+        required_permissions={Capability.GITHUB_READ},
+        args_model=ReadRepoArgs,
+        handler=github.read_repo,
+    )
+
+    if include_privileged:
+        registry.register(
+            name="system.request_privileged_action",
+            description=(
+                "Ask a human operator to perform a privileged system action. "
+                "This never executes anything; it creates a pending request."
+            ),
+            risk=RiskLevel.PRIVILEGED,
+            privileged=True,
+            required_permissions={Capability.PRIVILEGED_REQUEST},
+            args_model=RequestPrivilegedActionArgs,
+            handler=refuse,
+        )
+
+    return registry

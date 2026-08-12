@@ -1,0 +1,217 @@
+"""The single choke point for tool execution.
+
+    Agent → ToolBroker → PolicyEngine → Tool
+
+Agents hold a reference to a broker, never to a handler. There is no other path
+from an agent to a capability, which is what makes the policy engine
+unavoidable rather than merely advisory.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel, ValidationError
+
+from app.errors import ToolError, ToolNotFoundError
+from app.observability.events import EventBus, EventType
+from app.policy.engine import Effect, PolicyEngine
+from app.policy.permissions import Principal
+from app.privileged_bridge import PrivilegedGateway
+from app.tools.registry import ToolRegistry
+
+
+class InvocationStatus(StrEnum):
+    COMPLETED = "completed"
+    DENIED = "denied"
+    APPROVAL_REQUIRED = "approval_required"
+    FAILED = "failed"
+
+
+class ToolInvocation(BaseModel):
+    """What the agent asked for. Arguments are untrusted until validated."""
+
+    tool: str
+    arguments: dict[str, Any] = {}
+
+
+class ToolResult(BaseModel):
+    """What the agent gets back. Never a callable, never a raw exception."""
+
+    status: InvocationStatus
+    tool: str
+    output: dict[str, Any] | None = None
+    reason: str | None = None
+    rule_id: str | None = None
+    #: Present only when status is APPROVAL_REQUIRED.
+    request_id: str | None = None
+
+    def as_observation(self) -> str:
+        """A compact, model-facing rendering of the outcome."""
+        if self.status is InvocationStatus.COMPLETED:
+            return f"{self.tool} -> {self.output}"
+        if self.status is InvocationStatus.APPROVAL_REQUIRED:
+            return (
+                f"{self.tool} -> approval_required (request {self.request_id}). "
+                "A human operator must approve this; you cannot proceed with it."
+            )
+        return f"{self.tool} -> {self.status.value}: {self.reason}"
+
+
+class ToolBroker:
+    def __init__(
+        self,
+        *,
+        registry: ToolRegistry,
+        policy: PolicyEngine,
+        events: EventBus,
+        privileged_gateway: PrivilegedGateway | None = None,
+    ) -> None:
+        self._registry = registry
+        self._policy = policy
+        self._events = events
+        self._privileged_gateway = privileged_gateway
+
+    async def invoke(
+        self, principal: Principal, invocation: ToolInvocation
+    ) -> ToolResult:
+        task_id = principal.task_id
+        await self._events.emit(
+            EventType.TOOL_REQUESTED,
+            task_id=task_id,
+            actor=principal.name,
+            tool=invocation.tool,
+            role=principal.role.value,
+            model_kind=principal.model_kind.value,
+            arguments=invocation.arguments,
+        )
+
+        try:
+            spec = self._registry.get(invocation.tool)
+        except ToolNotFoundError as exc:
+            return await self._deny(
+                principal, invocation.tool, str(exc), rule_id="R0-unknown-tool"
+            )
+
+        decision = self._policy.evaluate(principal, spec.facts())
+
+        if decision.effect is Effect.DENY:
+            return await self._deny(
+                principal, spec.name, decision.reason, rule_id=decision.rule_id
+            )
+
+        # Belt and braces: the engine must never allow a privileged tool. If this
+        # ever fires, the policy table has been edited into an unsafe state and
+        # we fail closed rather than execute.
+        if spec.privileged and decision.effect is Effect.ALLOW:
+            return await self._deny(
+                principal,
+                spec.name,
+                "internal invariant violated: privileged tool was allowed directly",
+                rule_id="R3-invariant",
+            )
+
+        try:
+            arguments = spec.args_model.model_validate(invocation.arguments)
+        except ValidationError as exc:
+            reason = f"invalid arguments for {spec.name}: {exc.error_count()} problem(s)"
+            await self._events.emit(
+                EventType.TOOL_FAILED,
+                task_id=task_id,
+                actor=principal.name,
+                tool=spec.name,
+                reason=reason,
+            )
+            return ToolResult(
+                status=InvocationStatus.FAILED, tool=spec.name, reason=reason
+            )
+
+        if decision.effect is Effect.REQUIRE_APPROVAL:
+            return await self._request_approval(principal, spec.name, arguments)
+
+        await self._events.emit(
+            EventType.TOOL_ALLOWED,
+            task_id=task_id,
+            actor=principal.name,
+            tool=spec.name,
+            rule_id=decision.rule_id,
+        )
+
+        try:
+            output = await spec.handler(arguments)
+        except ToolError as exc:
+            await self._events.emit(
+                EventType.TOOL_FAILED,
+                task_id=task_id,
+                actor=principal.name,
+                tool=spec.name,
+                reason=str(exc),
+            )
+            return ToolResult(
+                status=InvocationStatus.FAILED, tool=spec.name, reason=str(exc)
+            )
+
+        await self._events.emit(
+            EventType.TOOL_COMPLETED,
+            task_id=task_id,
+            actor=principal.name,
+            tool=spec.name,
+        )
+        return ToolResult(
+            status=InvocationStatus.COMPLETED,
+            tool=spec.name,
+            output=output,
+            rule_id=decision.rule_id,
+        )
+
+    async def _deny(
+        self, principal: Principal, tool: str, reason: str, *, rule_id: str
+    ) -> ToolResult:
+        await self._events.emit(
+            EventType.TOOL_DENIED,
+            task_id=principal.task_id,
+            actor=principal.name,
+            tool=tool,
+            reason=reason,
+            rule_id=rule_id,
+        )
+        return ToolResult(
+            status=InvocationStatus.DENIED, tool=tool, reason=reason, rule_id=rule_id
+        )
+
+    async def _request_approval(
+        self, principal: Principal, tool: str, arguments: BaseModel
+    ) -> ToolResult:
+        if self._privileged_gateway is None:
+            return await self._deny(
+                principal,
+                tool,
+                "privileged requests are not enabled in this runtime",
+                rule_id="R3-no-gateway",
+            )
+
+        payload = arguments.model_dump()
+        request_text = str(payload.get("request", ""))
+        ticket = await self._privileged_gateway.submit(
+            requested_by=principal.name,
+            request_text=request_text,
+            task_id=principal.task_id,
+            context={"tool": tool, "role": principal.role.value},
+        )
+        await self._events.emit(
+            EventType.PRIVILEGED_ACTION_REQUESTED,
+            task_id=principal.task_id,
+            actor=principal.name,
+            tool=tool,
+            request_id=ticket.request_id,
+            status=ticket.status,
+            parsed_action=ticket.action,
+        )
+        return ToolResult(
+            status=InvocationStatus.APPROVAL_REQUIRED,
+            tool=tool,
+            request_id=ticket.request_id,
+            reason="approval_required",
+            rule_id="R3-privileged-requires-human",
+        )
