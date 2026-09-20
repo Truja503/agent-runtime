@@ -13,10 +13,10 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.observability.events import Event
-from app.tasks.state import Task
+from app.tasks.state import Task, TaskOptions
 
 
-class CreateTaskRequest(BaseModel):
+class CreateTaskRequest(TaskOptions):
     goal: str = Field(min_length=1, max_length=4000)
 
 
@@ -28,6 +28,7 @@ class TaskResponse(BaseModel):
     updated_at: datetime
     result: dict[str, Any] | None = None
     error: str | None = None
+    options: TaskOptions = Field(default_factory=TaskOptions)
 
     @classmethod
     def of(cls, task: Task) -> TaskResponse:
@@ -39,6 +40,7 @@ class TaskResponse(BaseModel):
             updated_at=task.updated_at,
             result=task.result,
             error=task.error,
+            options=task.options,
         )
 
 

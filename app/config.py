@@ -101,6 +101,23 @@ class Settings(BaseSettings):
     # Agent execution limits
     default_max_steps: int = Field(default=6, ge=1, le=50)
     model_max_tokens: int = Field(default=2048, ge=64, le=128_000)
+    model_timeout_seconds: float = Field(default=120, gt=0, le=3600)
+    model_retry_count: int = Field(default=2, ge=0, le=5)
+    model_profiles_path: Path | None = None
+    dev_prompt_inspection: bool = False
+    project_name: str = "default"
+    supervisor_model: str | None = None
+    researcher_model: str | None = None
+    coder_model: str | None = None
+    reviewer_model: str | None = None
+    supervisor_provider: ProviderKind | None = None
+    researcher_provider: ProviderKind | None = None
+    coder_provider: ProviderKind | None = None
+    reviewer_provider: ProviderKind | None = None
+    supervisor_max_tokens: int | None = Field(default=None, ge=64, le=128_000)
+    researcher_max_tokens: int | None = Field(default=None, ge=64, le=128_000)
+    coder_max_tokens: int | None = Field(default=None, ge=64, le=128_000)
+    reviewer_max_tokens: int | None = Field(default=None, ge=64, le=128_000)
 
     log_level: str = "INFO"
 
@@ -114,9 +131,7 @@ class Settings(BaseSettings):
                 continue
             parts = raw.split(":")
             if len(parts) != 3:
-                raise RuntimeConfigError(
-                    "API_TOKENS entries must look like 'name:role:token'"
-                )
+                raise RuntimeConfigError("API_TOKENS entries must look like 'name:role:token'")
             name, role, token = (part.strip() for part in parts)
             if not name or not token:
                 raise RuntimeConfigError("API_TOKENS entries need a non-empty name and token")

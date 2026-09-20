@@ -13,6 +13,7 @@ from app.api.deps import get_runtime
 from app.api.schemas import CreateTaskRequest, EventResponse, TaskResponse
 from app.container import Runtime
 from app.errors import InvalidTaskTransitionError, TaskNotFoundError
+from app.tasks.state import TaskOptions
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -23,7 +24,17 @@ async def create_task(
     runtime: Runtime = Depends(get_runtime),
     caller: ApiCaller = Depends(require_operator),
 ) -> TaskResponse:
-    task = await runtime.tasks.create(body.goal, created_by=caller.name)
+    if body.project != runtime.settings.project_name:
+        raise HTTPException(422, "unknown project")
+    if body.workspace and body.workspace != str(runtime.settings.workspace_root.resolve()):
+        raise HTTPException(422, "workspace must match the configured project")
+    if body.model_profile and body.model_profile not in runtime.pool.configuration.profiles:
+        raise HTTPException(422, "unknown model profile")
+    options = TaskOptions.model_validate(body.model_dump(exclude={"goal"}))
+    options.workspace = str(runtime.settings.workspace_root.resolve())
+    task = await runtime.tasks.create(
+        runtime.inspection.privacy.text(body.goal), created_by=caller.name, options=options
+    )
     runtime.schedule_task(task.id)
     return TaskResponse.of(task)
 

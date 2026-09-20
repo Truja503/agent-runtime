@@ -7,11 +7,12 @@ elsewhere entirely — see ``app/policy`` and ``privileged/``.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from abc import ABC, abstractmethod
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +43,8 @@ class ModelRequest(BaseModel):
     #: Routing/observability hints. Never sent to a provider; used for event
     #: metadata and by the offline scripted provider.
     metadata: dict[str, str] = Field(default_factory=dict)
+    response_schema: dict[str, Any] | None = None
+    structured_output: Literal["schema", "json", "off"] = "off"
 
 
 class ModelUsage(BaseModel):
@@ -106,6 +109,27 @@ class BaseModelProvider(ABC):
 
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+
+
+def closed_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Close objects and express optional fields as nullable for strict decoders."""
+    result = copy.deepcopy(schema)
+
+    def visit(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+        elif isinstance(node, dict):
+            node.pop("default", None)
+            if node.get("type") == "object":
+                node["additionalProperties"] = False
+                properties = node.setdefault("properties", {})
+                node["required"] = list(properties)
+            for value in list(node.values()):
+                visit(value)
+
+    visit(result)
+    return result
 
 
 def extract_json_object(text: str) -> dict[str, object] | None:

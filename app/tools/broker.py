@@ -9,6 +9,7 @@ unavoidable rather than merely advisory.
 
 from __future__ import annotations
 
+import asyncio
 from enum import StrEnum
 from typing import Any
 
@@ -72,11 +73,15 @@ class ToolBroker:
         self._policy = policy
         self._events = events
         self._privileged_gateway = privileged_gateway
+        self.cancelled_tasks: set[str] = set()
 
-    async def invoke(
-        self, principal: Principal, invocation: ToolInvocation
-    ) -> ToolResult:
+    def check_cancelled(self, task_id: str | None) -> None:
+        if task_id in self.cancelled_tasks:
+            raise asyncio.CancelledError
+
+    async def invoke(self, principal: Principal, invocation: ToolInvocation) -> ToolResult:
         task_id = principal.task_id
+        self.check_cancelled(task_id)
         await self._events.emit(
             EventType.TOOL_REQUESTED,
             task_id=task_id,
@@ -84,22 +89,20 @@ class ToolBroker:
             tool=invocation.tool,
             role=principal.role.value,
             model_kind=principal.model_kind.value,
-            arguments=invocation.arguments,
+            arguments={k: v for k, v in invocation.arguments.items()
+                       if k in {"path", "suite", "owner", "repo"}},
+            argument_names=sorted(invocation.arguments),
         )
 
         try:
             spec = self._registry.get(invocation.tool)
         except ToolNotFoundError as exc:
-            return await self._deny(
-                principal, invocation.tool, str(exc), rule_id="R0-unknown-tool"
-            )
+            return await self._deny(principal, invocation.tool, str(exc), rule_id="R0-unknown-tool")
 
         decision = self._policy.evaluate(principal, spec.facts())
 
         if decision.effect is Effect.DENY:
-            return await self._deny(
-                principal, spec.name, decision.reason, rule_id=decision.rule_id
-            )
+            return await self._deny(principal, spec.name, decision.reason, rule_id=decision.rule_id)
 
         # Belt and braces: the engine must never allow a privileged tool. If this
         # ever fires, the policy table has been edited into an unsafe state and
@@ -123,11 +126,10 @@ class ToolBroker:
                 tool=spec.name,
                 reason=reason,
             )
-            return ToolResult(
-                status=InvocationStatus.FAILED, tool=spec.name, reason=reason
-            )
+            return ToolResult(status=InvocationStatus.FAILED, tool=spec.name, reason=reason)
 
         if decision.effect is Effect.REQUIRE_APPROVAL:
+            self.check_cancelled(task_id)
             return await self._request_approval(principal, spec.name, arguments)
 
         await self._events.emit(
@@ -136,9 +138,11 @@ class ToolBroker:
             actor=principal.name,
             tool=spec.name,
             rule_id=decision.rule_id,
+            reason=decision.reason,
         )
 
         try:
+            self.check_cancelled(task_id)
             output = await spec.handler(arguments)
         except ToolError as exc:
             await self._events.emit(
@@ -148,15 +152,19 @@ class ToolBroker:
                 tool=spec.name,
                 reason=str(exc),
             )
-            return ToolResult(
-                status=InvocationStatus.FAILED, tool=spec.name, reason=str(exc)
-            )
+            return ToolResult(status=InvocationStatus.FAILED, tool=spec.name, reason=str(exc))
 
         await self._events.emit(
             EventType.TOOL_COMPLETED,
             task_id=task_id,
             actor=principal.name,
             tool=spec.name,
+            result={
+                k: v
+                for k, v in output.items()
+                if k
+                in {"path", "bytes", "bytes_written", "truncated", "suite", "exit_code", "passed"}
+            },
         )
         return ToolResult(
             status=InvocationStatus.COMPLETED,
@@ -176,9 +184,7 @@ class ToolBroker:
             reason=reason,
             rule_id=rule_id,
         )
-        return ToolResult(
-            status=InvocationStatus.DENIED, tool=tool, reason=reason, rule_id=rule_id
-        )
+        return ToolResult(status=InvocationStatus.DENIED, tool=tool, reason=reason, rule_id=rule_id)
 
     async def _request_approval(
         self, principal: Principal, tool: str, arguments: BaseModel

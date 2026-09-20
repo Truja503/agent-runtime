@@ -9,9 +9,20 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
+
+from app.tasks.evidence import AcceptanceCriteria
+
+
+class TaskOptions(BaseModel):
+    agent: Literal["auto", "supervisor", "researcher", "coder", "reviewer"] = "auto"
+    project: str = "default"
+    max_steps: int | None = Field(default=None, ge=1, le=50)
+    model_profile: str | None = None
+    workspace: str = ""
+    acceptance: AcceptanceCriteria = Field(default_factory=AcceptanceCriteria)
 
 
 class TaskStatus(StrEnum):
@@ -30,9 +41,7 @@ TERMINAL_STATUSES: frozenset[TaskStatus] = frozenset(
 )
 
 ALLOWED_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
-    TaskStatus.CREATED: frozenset(
-        {TaskStatus.PLANNING, TaskStatus.FAILED, TaskStatus.CANCELLED}
-    ),
+    TaskStatus.CREATED: frozenset({TaskStatus.PLANNING, TaskStatus.FAILED, TaskStatus.CANCELLED}),
     TaskStatus.PLANNING: frozenset(
         {
             TaskStatus.RUNNING,
@@ -86,6 +95,7 @@ class Task(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     result: dict[str, Any] | None = None
     error: str | None = None
+    options: TaskOptions = Field(default_factory=TaskOptions)
 
 
 class TaskStore(Protocol):

@@ -7,7 +7,7 @@ for the path is untrusted by construction. ``../../../../etc/passwd`` and
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -40,18 +40,18 @@ class Workspace:
             raise ToolExecutionError("path must not contain null bytes")
 
         candidate = Path(relative)
-        if candidate.is_absolute() or relative.startswith("~"):
-            raise ToolExecutionError(
-                f"absolute paths are not permitted: {relative!r}"
-            )
+        if (
+            candidate.is_absolute()
+            or relative.startswith(("~", "/", "\\"))
+            or PureWindowsPath(relative).drive
+        ):
+            raise ToolExecutionError(f"absolute paths are not permitted: {relative!r}")
 
         # resolve() collapses `..` and follows symlinks, so the containment
         # check below sees the real destination rather than the literal string.
         resolved = (self.root / candidate).resolve()
         if resolved != self.root and self.root not in resolved.parents:
-            raise ToolExecutionError(
-                f"path escapes the workspace: {relative!r}"
-            )
+            raise ToolExecutionError(f"path escapes the workspace: {relative!r}")
         return resolved
 
     def relative(self, path: Path) -> str:

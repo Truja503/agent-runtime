@@ -7,6 +7,8 @@ the trust classification: see ``kind`` on each provider.
 
 from __future__ import annotations
 
+from typing import Any
+
 import openai
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -34,17 +36,32 @@ async def chat_completion(
             messages.append({"role": "user", "content": message.content})
 
     try:
+        response_format: Any = openai.omit
+        if request.response_schema and request.structured_output == "schema":
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "agent_response",
+                    "schema": request.response_schema,
+                    "strict": True,
+                },
+            }
+        elif request.structured_output == "json":
+            response_format = {"type": "json_object"}
         completion = await client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=request.max_tokens,
-            temperature=(
-                request.temperature if request.temperature is not None else openai.omit
-            ),
+            temperature=(request.temperature if request.temperature is not None else openai.omit),
             stop=request.stop or openai.omit,
+            response_format=response_format,
         )
+    except openai.APITimeoutError:
+        raise TimeoutError("model transport timeout") from None
     except openai.APIStatusError as exc:
-        raise ModelUnavailableError(f"{label} returned HTTP {exc.status_code}") from None
+        error = ModelUnavailableError if exc.status_code in {408, 429} or exc.status_code >= 500 \
+            else ModelResponseError
+        raise error(f"{label} returned HTTP {exc.status_code}") from None
     except openai.APIConnectionError:
         raise ModelUnavailableError(f"could not reach the {label} endpoint") from None
 

@@ -64,7 +64,12 @@ def test_symlink_out_of_the_workspace_is_rejected(
     """Containment is checked after resolution, so a symlink cannot smuggle."""
     secret = tmp_path / "secret.txt"
     secret.write_text("classified")
-    (workspace.root / "link.txt").symlink_to(secret)
+    try:
+        (workspace.root / "link.txt").symlink_to(secret)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows account lacks symlink creation privilege")
+        raise
 
     with pytest.raises(ToolExecutionError, match="escapes the workspace"):
         workspace.resolve("link.txt")

@@ -7,6 +7,7 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from app.storage import apply_schema, connect
 from app.tasks.state import Task, TaskStatus
@@ -51,16 +52,32 @@ class SQLiteTaskStore:
     def __init__(self, path: Path) -> None:
         self._path = path
         apply_schema(path, TASKS_DDL)
+        with connect(path) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+            if "options" not in columns:
+                connection.execute(
+                    "ALTER TABLE tasks ADD COLUMN options TEXT NOT NULL DEFAULT '{}'"
+                )
 
     async def create(self, task: Task) -> Task:
-        await asyncio.to_thread(self._insert, task)
+        await self._write(self._insert, task)
         return task
+
+    @staticmethod
+    async def _write(operation: Any, task: Task) -> None:
+        # Drain SQLite writes before cancellation can persist its terminal state.
+        write = asyncio.create_task(asyncio.to_thread(operation, task))
+        try:
+            await asyncio.shield(write)
+        except asyncio.CancelledError:
+            await write
+            raise
 
     def _insert(self, task: Task) -> None:
         with connect(self._path) as connection:
             connection.execute(
                 "INSERT INTO tasks (id, goal, status, created_by, created_at, updated_at,"
-                " result, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " result, error, options) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 self._row(task),
             )
 
@@ -69,20 +86,18 @@ class SQLiteTaskStore:
 
     def _get(self, task_id: str) -> Task | None:
         with connect(self._path) as connection:
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE id = ?", (task_id,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._task(row) if row else None
 
     async def update(self, task: Task) -> Task:
-        await asyncio.to_thread(self._update, task)
+        await self._write(self._update, task)
         return task
 
     def _update(self, task: Task) -> None:
         with connect(self._path) as connection:
             connection.execute(
                 "UPDATE tasks SET goal = ?, status = ?, created_by = ?, created_at = ?,"
-                " updated_at = ?, result = ?, error = ? WHERE id = ?",
+                " updated_at = ?, result = ?, error = ?, options = ? WHERE id = ?",
                 (*self._row(task)[1:], task.id),
             )
 
@@ -107,6 +122,7 @@ class SQLiteTaskStore:
             task.updated_at.isoformat(),
             json.dumps(task.result) if task.result is not None else None,
             task.error,
+            task.options.model_dump_json(),
         )
 
     @staticmethod
@@ -120,4 +136,5 @@ class SQLiteTaskStore:
             updated_at=datetime.fromisoformat(row["updated_at"]),
             result=json.loads(row["result"]) if row["result"] else None,
             error=row["error"],
+            options=json.loads(row["options"]),
         )

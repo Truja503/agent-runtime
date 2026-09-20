@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
 from app.errors import InvalidTaskTransitionError, TaskNotFoundError
 from app.observability.events import Event, EventBus, EventType
-from app.tasks.state import Task, TaskStatus, TaskStore, can_transition
+from app.tasks.state import Task, TaskOptions, TaskStatus, TaskStore, can_transition
 
 
 class TaskManager:
     def __init__(self, store: TaskStore, events: EventBus) -> None:
         self._store = store
         self._events = events
+        self.stop_execution: Callable[[str], Awaitable[None]] | None = None
 
-    async def create(self, goal: str, *, created_by: str) -> Task:
-        task = Task(goal=goal, created_by=created_by)
+    async def create(
+        self, goal: str, *, created_by: str, options: TaskOptions | None = None
+    ) -> Task:
+        task = Task(goal=goal, created_by=created_by, options=options or TaskOptions())
         await self._store.create(task)
         await self._events.emit(
             EventType.TASK_CREATED,
@@ -59,9 +63,7 @@ class TaskManager:
     async def complete(self, task_id: str, result: dict[str, Any]) -> Task:
         task = await self.get(task_id)
         if not can_transition(task.status, TaskStatus.COMPLETED):
-            raise InvalidTaskTransitionError(
-                f"cannot complete task {task_id} from {task.status}"
-            )
+            raise InvalidTaskTransitionError(f"cannot complete task {task_id} from {task.status}")
         task.status = TaskStatus.COMPLETED
         task.result = result
         task.updated_at = datetime.now(UTC)
@@ -86,12 +88,20 @@ class TaskManager:
         )
         return task
 
+    async def record_result(self, task_id: str, result: dict[str, Any]) -> None:
+        task = await self.get(task_id)
+        task.result = result
+        await self._store.update(task)
+
     async def cancel(self, task_id: str, *, actor: str) -> Task:
         task = await self.get(task_id)
         if not can_transition(task.status, TaskStatus.CANCELLED):
-            raise InvalidTaskTransitionError(
-                f"cannot cancel task {task_id} from {task.status}"
-            )
+            raise InvalidTaskTransitionError(f"cannot cancel task {task_id} from {task.status}")
+        if self.stop_execution:
+            await self.stop_execution(task_id)
+        task = await self.get(task_id)
+        if not can_transition(task.status, TaskStatus.CANCELLED):
+            raise InvalidTaskTransitionError(f"cannot cancel task from {task.status}")
         task.status = TaskStatus.CANCELLED
         task.updated_at = datetime.now(UTC)
         await self._store.update(task)

@@ -1,0 +1,8 @@
+<script setup lang="ts">
+import { ref } from 'vue'
+const props = defineProps<{project:{name:string;workspace:string}; profiles:string[]; editable:boolean; busy:boolean}>()
+const emit = defineEmits<{run:[body:Record<string,unknown>]}>()
+const goal=ref(''), agent=ref('auto'), maxSteps=ref(6), profile=ref('')
+function run(){emit('run',{goal:goal.value,agent:agent.value,project:props.project.name,workspace:props.project.workspace,max_steps:maxSteps.value,model_profile:profile.value || null})}
+</script>
+<template><section class="panel"><div class="section-top"><h2>Run a task</h2><span class="eyebrow">WORKSPACE CONFINED</span></div><form @submit.prevent="run"><label for="goal">Ask the runtime to…</label><textarea id="goal" v-model="goal" rows="4" maxlength="4000" required placeholder="Describe a concrete goal, files to inspect, and what should be verified." /><div class="form-row"><label>Routing<select v-model="agent"><option value="auto">AUTO · Supervisor flow</option><option v-for="role in ['supervisor','researcher','coder','reviewer']" :key="role" :value="role">{{role}}</option></select></label><button class="primary" :disabled="!editable || busy || !goal.trim()">{{busy ? 'Creating…' : 'Run task →'}}</button></div><details><summary>Advanced options</summary><p class="muted">{{project.name}} · {{project.workspace}}</p><div class="form-row"><label>Max worker steps<input type="number" v-model.number="maxSteps" min="1" max="50" /></label><label>Explicit model override<select v-model="profile"><option value="">Use each agent’s profile</option><option v-for="p in profiles" :key="p">{{p}}</option></select></label></div></details></form></section></template>

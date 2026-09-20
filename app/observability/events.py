@@ -11,6 +11,7 @@ reaches the store is already leaked.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol
@@ -50,6 +51,11 @@ class EventType(StrEnum):
     MODEL_REQUEST = "model_request"
     MODEL_RESPONSE = "model_response"
     MODEL_ERROR = "model_error"
+    MODEL_TIMEOUT = "model_timeout"
+    MODEL_RETRY = "model_retry"
+    MODEL_FAILED = "model_failed"
+    MODEL_INVALID_RESPONSE = "model_invalid_response"
+    CONFIGURATION_CHANGED = "configuration_changed"
 
     TOOL_REQUESTED = "tool_requested"
     TOOL_ALLOWED = "tool_allowed"
@@ -100,6 +106,7 @@ class EventBus:
 
     def __init__(self, sinks: list[EventSink]) -> None:
         self._sinks = sinks
+        self.privacy: Callable[[Any], Any] = lambda value: value
 
     async def emit(
         self,
@@ -113,7 +120,7 @@ class EventBus:
             type=event_type,
             task_id=task_id,
             actor=actor,
-            payload={key: redact(value, key=key) for key, value in payload.items()},
+            payload={key: redact(value, key=key) for key, value in self.privacy(payload).items()},
         )
         for sink in self._sinks:
             await sink.append(event)

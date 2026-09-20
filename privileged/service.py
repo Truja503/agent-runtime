@@ -133,7 +133,7 @@ class PrivilegedRequestService:
             await self._audit.record(
                 "privileged_action_denied",
                 {
-                    "request_id": request_id,
+                    "request_id": request_id, "task_id": request.task_id,
                     "operator": operator.operator_id,
                     "reason": str(exc),
                 },
@@ -143,7 +143,7 @@ class PrivilegedRequestService:
         await self._audit.record(
             "privileged_action_approved",
             {
-                "request_id": request_id,
+                "request_id": request_id, "task_id": request.task_id,
                 "operator": operator.operator_id,
                 "action": intent.action.value,
                 "service": intent.service,
@@ -160,7 +160,7 @@ class PrivilegedRequestService:
             await self._store.save(request)
             await self._audit.record(
                 "privileged_action_failed",
-                {"request_id": request_id, "reason": str(exc)},
+                {"request_id": request_id, "task_id": request.task_id, "reason": str(exc)},
             )
             return request
 
@@ -174,7 +174,7 @@ class PrivilegedRequestService:
             if result.succeeded
             else "privileged_action_failed",
             {
-                "request_id": request_id,
+                "request_id": request_id, "task_id": request.task_id,
                 "operator": operator.operator_id,
                 "action": intent.action.value,
                 "service": intent.service,
@@ -203,7 +203,7 @@ class PrivilegedRequestService:
         await self._audit.record(
             "privileged_action_denied",
             {
-                "request_id": request_id,
+                "request_id": request_id, "task_id": request.task_id,
                 "operator": operator.operator_id,
                 "reason": request.reason,
             },
