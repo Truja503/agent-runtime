@@ -9,10 +9,13 @@ unavoidable rather than merely advisory.
 
 from __future__ import annotations
 
+import asyncio
+import json
+from contextvars import ContextVar
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.errors import ToolError, ToolNotFoundError
 from app.observability.events import EventBus, EventType
@@ -20,6 +23,8 @@ from app.policy.engine import Effect, PolicyEngine
 from app.policy.permissions import Principal
 from app.privileged_bridge import PrivilegedGateway
 from app.tools.registry import ToolRegistry
+
+CURRENT_TOOL_TASK: ContextVar[str | None] = ContextVar("current_tool_task", default=None)
 
 
 class InvocationStatus(StrEnum):
@@ -46,11 +51,12 @@ class ToolResult(BaseModel):
     rule_id: str | None = None
     #: Present only when status is APPROVAL_REQUIRED.
     request_id: str | None = None
+    images: list[str] = Field(default_factory=list, exclude=True)
 
     def as_observation(self) -> str:
         """A compact, model-facing rendering of the outcome."""
         if self.status is InvocationStatus.COMPLETED:
-            return f"{self.tool} -> {self.output}"
+            return f"{self.tool} -> {json.dumps(self.output, ensure_ascii=False)}"
         if self.status is InvocationStatus.APPROVAL_REQUIRED:
             return (
                 f"{self.tool} -> approval_required (request {self.request_id}). "
@@ -72,11 +78,15 @@ class ToolBroker:
         self._policy = policy
         self._events = events
         self._privileged_gateway = privileged_gateway
+        self.cancelled_tasks: set[str] = set()
 
-    async def invoke(
-        self, principal: Principal, invocation: ToolInvocation
-    ) -> ToolResult:
+    def check_cancelled(self, task_id: str | None) -> None:
+        if task_id in self.cancelled_tasks:
+            raise asyncio.CancelledError
+
+    async def invoke(self, principal: Principal, invocation: ToolInvocation) -> ToolResult:
         task_id = principal.task_id
+        self.check_cancelled(task_id)
         await self._events.emit(
             EventType.TOOL_REQUESTED,
             task_id=task_id,
@@ -84,22 +94,23 @@ class ToolBroker:
             tool=invocation.tool,
             role=principal.role.value,
             model_kind=principal.model_kind.value,
-            arguments=invocation.arguments,
+            arguments={
+                k: v
+                for k, v in invocation.arguments.items()
+                if k in {"path", "offset", "max_bytes", "suite", "owner", "repo"}
+            },
+            argument_names=sorted(invocation.arguments),
         )
 
         try:
             spec = self._registry.get(invocation.tool)
         except ToolNotFoundError as exc:
-            return await self._deny(
-                principal, invocation.tool, str(exc), rule_id="R0-unknown-tool"
-            )
+            return await self._deny(principal, invocation.tool, str(exc), rule_id="R0-unknown-tool")
 
         decision = self._policy.evaluate(principal, spec.facts())
 
         if decision.effect is Effect.DENY:
-            return await self._deny(
-                principal, spec.name, decision.reason, rule_id=decision.rule_id
-            )
+            return await self._deny(principal, spec.name, decision.reason, rule_id=decision.rule_id)
 
         # Belt and braces: the engine must never allow a privileged tool. If this
         # ever fires, the policy table has been edited into an unsafe state and
@@ -123,11 +134,10 @@ class ToolBroker:
                 tool=spec.name,
                 reason=reason,
             )
-            return ToolResult(
-                status=InvocationStatus.FAILED, tool=spec.name, reason=reason
-            )
+            return ToolResult(status=InvocationStatus.FAILED, tool=spec.name, reason=reason)
 
         if decision.effect is Effect.REQUIRE_APPROVAL:
+            self.check_cancelled(task_id)
             return await self._request_approval(principal, spec.name, arguments)
 
         await self._events.emit(
@@ -136,10 +146,16 @@ class ToolBroker:
             actor=principal.name,
             tool=spec.name,
             rule_id=decision.rule_id,
+            reason=decision.reason,
         )
 
         try:
-            output = await spec.handler(arguments)
+            self.check_cancelled(task_id)
+            context_token = CURRENT_TOOL_TASK.set(task_id)
+            try:
+                output = await spec.handler(arguments)
+            finally:
+                CURRENT_TOOL_TASK.reset(context_token)
         except ToolError as exc:
             await self._events.emit(
                 EventType.TOOL_FAILED,
@@ -148,18 +164,83 @@ class ToolBroker:
                 tool=spec.name,
                 reason=str(exc),
             )
-            return ToolResult(
-                status=InvocationStatus.FAILED, tool=spec.name, reason=str(exc)
+            return ToolResult(status=InvocationStatus.FAILED, tool=spec.name, reason=str(exc))
+
+        if (
+            spec.name
+            in {
+                "web.search",
+                "web.request",
+                "web.fetch",
+                "docs.fetch",
+                "assets.search_images",
+                "assets.import_image",
+            }
+            and output.get("status") == "denied"
+        ):
+            return await self._deny(
+                principal,
+                spec.name,
+                str(output.get("reason") or output.get("error") or "egress denied"),
+                rule_id="web-egress",
             )
 
+        if spec.name.startswith(("web.", "docs.", "assets.", "browser.")) and output.get(
+            "status"
+        ) in {
+            "not_configured",
+            "failed",
+        }:
+            reason = str(output.get("reason") or output.get("error") or "web request failed")
+            if output.get("error_code") == "browser_unavailable":
+                reason = "browser_unavailable: " + reason
+            await self._events.emit(
+                EventType.TOOL_FAILED,
+                task_id=task_id,
+                actor=principal.name,
+                tool=spec.name,
+                reason=reason,
+            )
+            return ToolResult(
+                status=InvocationStatus.FAILED, tool=spec.name, output=output, reason=reason
+            )
+
+        images = output.pop("_images", []) if spec.name.startswith("browser.") else []
         await self._events.emit(
             EventType.TOOL_COMPLETED,
             task_id=task_id,
             actor=principal.name,
             tool=spec.name,
+            result={
+                k: v
+                for k, v in output.items()
+                if k
+                in {
+                    "path",
+                    "bytes",
+                    "bytes_written",
+                    "changed",
+                    "truncated",
+                    "suite",
+                    "exit_code",
+                    "passed",
+                    "complete",
+                    "offset",
+                    "bytes_returned",
+                    "total_bytes",
+                    "next_offset",
+                    "version",
+                    "project",
+                    "screenshots_generated",
+                    "screenshots",
+                    "report_path",
+                    "previews",
+                }
+            },
         )
         return ToolResult(
             status=InvocationStatus.COMPLETED,
+            images=images,
             tool=spec.name,
             output=output,
             rule_id=decision.rule_id,
@@ -176,9 +257,7 @@ class ToolBroker:
             reason=reason,
             rule_id=rule_id,
         )
-        return ToolResult(
-            status=InvocationStatus.DENIED, tool=tool, reason=reason, rule_id=rule_id
-        )
+        return ToolResult(status=InvocationStatus.DENIED, tool=tool, reason=reason, rule_id=rule_id)
 
     async def _request_approval(
         self, principal: Principal, tool: str, arguments: BaseModel
@@ -193,6 +272,13 @@ class ToolBroker:
 
         payload = arguments.model_dump()
         request_text = str(payload.get("request", ""))
+        if any(word in request_text.lower() for word in ("playwright", "chromium")):
+            return ToolResult(
+                status=InvocationStatus.FAILED,
+                tool=tool,
+                reason="browser_unavailable: browser dependency setup is operator-owned; "
+                "run python -m playwright install chromium outside the agent workflow",
+            )
         ticket = await self._privileged_gateway.submit(
             requested_by=principal.name,
             request_text=request_text,
@@ -208,6 +294,13 @@ class ToolBroker:
             status=ticket.status,
             parsed_action=ticket.action,
         )
+        if ticket.status != "awaiting_approval":
+            return ToolResult(
+                status=InvocationStatus.FAILED,
+                tool=tool,
+                request_id=ticket.request_id,
+                reason=f"approval_{ticket.status}",
+            )
         return ToolResult(
             status=InvocationStatus.APPROVAL_REQUIRED,
             tool=tool,

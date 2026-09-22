@@ -24,6 +24,8 @@ class PrivilegedTicket(BaseModel):
     request_id: str
     status: str
     action: str | None = None
+    reason: str | None = None
+    result: dict[str, Any] | None = None
 
 
 class PrivilegedGateway(Protocol):
@@ -85,4 +87,6 @@ class InProcessPrivilegedGateway:
             request_id=record.request_id,
             status=record.status.value,
             action=record.intent.action.value if record.intent else None,
+            reason=record.reason,
+            result=record.result.model_dump(mode="json") if record.result else None,
         )

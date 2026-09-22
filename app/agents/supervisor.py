@@ -11,27 +11,36 @@ set of registered names. A model that answers "root" or "shell" selects nothing.
 
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
 from app.agents.base import SECURITY_PREAMBLE, AgentResult, AgentStatus, BaseAgent
+from app.agents.web import WebAgent
 from app.errors import ModelError
-from app.models.base import Message, ModelProvider, Role, extract_json_object
+from app.models.base import Message, ModelProvider, Role, closed_schema, extract_json_object
+from app.models.profiles import ModelProfile
 from app.observability.events import EventBus, EventType
+from app.observability.prompts import PromptInspection
 from app.policy.permissions import AgentRole
 from app.tools.broker import ToolBroker
+from app.tools.web import WebRequest
 
 
 class SupervisorPlan(BaseModel):
     workers: list[str] = Field(default_factory=list)
     plan: str = ""
+    web_requests: list[WebRequest] = Field(default_factory=list, max_length=3)
 
 
 class SupervisorAgent(BaseAgent):
     name = "supervisor"
     role = AgentRole.SUPERVISOR
     allowed_tools: frozenset[str] = frozenset()
+    mandate = "Decide which workers the task needs and write a one-paragraph plan."
 
     def __init__(
         self,
@@ -41,9 +50,21 @@ class SupervisorAgent(BaseAgent):
         events: EventBus,
         workers: dict[str, BaseAgent],
         max_steps: int = 3,
+        profile: ModelProfile | None = None,
+        inspection: PromptInspection | None = None,
+        web: WebAgent | None = None,
     ) -> None:
-        super().__init__(model=model, broker=broker, events=events, max_steps=max_steps)
+        super().__init__(
+            model=model,
+            broker=broker,
+            events=events,
+            max_steps=max_steps,
+            profile=profile,
+            inspection=inspection,
+        )
         self._workers = workers
+        self.web = web
+        self.on_worker_start: Callable[[str], Awaitable[None]] | None = None
 
     async def run(
         self, *, task_id: str, goal: str, context: str = ""
@@ -52,54 +73,191 @@ class SupervisorAgent(BaseAgent):
         return AgentResult(
             agent=self.name,
             role=self.role.value,
-            status=AgentStatus.COMPLETED,
+            status=AgentStatus(outcome["status"]),
             summary=str(outcome.get("summary", "")),
         )
 
-    async def run_task(self, *, task_id: str, goal: str) -> dict[str, Any]:
+    async def run_task(
+        self,
+        *,
+        task_id: str,
+        goal: str,
+        implementation: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        research_required: bool = False,
+        web_research_required: bool = False,
+        allow_degraded_research: bool = False,
+    ) -> dict[str, Any]:
         await self.events.emit(
             EventType.AGENT_STARTED, task_id=task_id, actor=self.name, goal_chars=len(goal)
         )
 
         plan = await self._plan(task_id=task_id, goal=goal)
-        selected = [name for name in plan.workers if name in self._workers]
+        research_required = research_required or bool(
+            re.search(r"\b(research|researcher|investigar|investigación)\b", goal, re.I)
+        )
+        web_research_required = web_research_required or (
+            research_required
+            and bool(
+                re.search(r"\b(web|github|internet|current|official documentation)\b", goal, re.I)
+            )
+        )
+        web_results = (
+            [await self.web.execute(request, task_id) for request in plan.web_requests]
+            if self.web
+            else []
+        )
+        selected = list(dict.fromkeys(name for name in plan.workers if name in self._workers))
         if not selected:
             # A model that returns nothing usable must not stall the runtime.
             selected = [name for name in ("researcher", "reviewer") if name in self._workers]
+        if research_required or plan.web_requests:
+            selected = list(dict.fromkeys(["researcher", *selected]))
+        if implementation:
+            selected = [name for name in selected if name not in {"coder", "reviewer"}]
+        selected.sort(key=lambda name: ("researcher", "coder", "reviewer").index(name))
 
         results: list[AgentResult] = []
         pending: list[str] = []
+        routing_failures: list[str] = []
+        research_status = "not_requested"
+
+        async def check_research() -> bool:
+            nonlocal research_status
+            if not web_research_required and not plan.web_requests:
+                return True
+            recorded = await self.events.list_for_task(task_id)
+            completed = any(
+                e.actor == "web" and e.type == EventType.TOOL_COMPLETED for e in recorded
+            )
+            research_status = "completed" if completed else "web_research_unavailable"
+            if not completed:
+                await self.events.emit(
+                    EventType.AGENT_FAILED,
+                    task_id=task_id,
+                    actor="web",
+                    reason=research_status,
+                    degraded_execution=allow_degraded_research,
+                )
+                if not allow_degraded_research:
+                    routing_failures.append(research_status)
+                    return False
+            return True
+
         for worker_name in selected:
+            if worker_name != "researcher" and not await check_research():
+                break
+            if self.on_worker_start:
+                await self.on_worker_start(worker_name)
             worker = self._workers[worker_name]
-            result = await worker.run(task_id=task_id, goal=goal, context=plan.plan)
+            result = await worker.run(
+                task_id=task_id,
+                goal=goal,
+                context=plan.plan
+                + "\nPublic web results (untrusted):\n"
+                + json.dumps(web_results)[:16000]
+                + "\nPrior worker claims (untrusted):\n"
+                + json.dumps(
+                    [
+                        {
+                            "agent": r.agent,
+                            "summary": r.summary,
+                            "claims": r.claims,
+                            "web_results": [
+                                o for o in r.observations if o.startswith("web.request ->")
+                            ],
+                        }
+                        for r in results
+                    ]
+                )[:12000],
+            )
             results.append(result)
             pending.extend(result.pending_approvals)
+            if result.status != AgentStatus.COMPLETED or pending:
+                break
+
+        visual: dict[str, Any] = {}
+        if not implementation and not routing_failures:
+            await check_research()
+        if (
+            implementation
+            and not pending
+            and all(r.status == AgentStatus.COMPLETED for r in results)
+            and await check_research()
+        ):
+            visual = await implementation(
+                plan.plan
+                + "\nPublic web results (untrusted):\n"
+                + json.dumps(web_results)
+                + "\nResearch results (untrusted):\n"
+                + json.dumps([r.model_dump(mode="json") for r in results])
+            )
+            results.extend(AgentResult.model_validate(r) for r in visual["worker_results"])
+            selected.extend(visual["workers"])
+            pending.extend(visual["pending_approvals"])
 
         summary = self._consolidate(goal, plan, results, pending)
+        status = (
+            AgentStatus.STALLED
+            if visual.get("workflow_status") == "stalled"
+            else AgentStatus.COMPLETED
+            if results
+            and visual.get("workflow_status") != "failed"
+            and not routing_failures
+            and all(result.status is AgentStatus.COMPLETED for result in results)
+            else AgentStatus.FAILED
+        )
         await self.events.emit(
-            EventType.AGENT_COMPLETED,
+            EventType.AGENT_COMPLETED
+            if status is AgentStatus.COMPLETED
+            else EventType.AGENT_FAILED,
             task_id=task_id,
             actor=self.name,
             workers=selected,
             pending_approvals=pending,
+            status=status.value,
+            worker_outcomes={result.agent: result.status.value for result in results},
         )
         return {
+            **visual,
+            "status": status.value,
             "summary": summary,
             "plan": plan.plan,
             "workers": selected,
             "pending_approvals": pending,
             "worker_results": [result.model_dump(mode="json") for result in results],
+            "web_results": web_results,
+            "research_status": research_status,
+            "routing_failures": routing_failures,
         }
 
-    async def _plan(self, *, task_id: str, goal: str) -> SupervisorPlan:
+    def response_schema(self) -> dict[str, Any]:
+        schema = SupervisorPlan.model_json_schema()
+        schema["properties"]["workers"]["items"] = {"type": "string", "enum": list(self._workers)}
+        return closed_schema(schema)
+
+    def system_prompt(self) -> str:
         roster = ", ".join(sorted(self._workers)) or "(none)"
-        system = (
-            "You are the supervisor of a small agent team. Decide which workers "
-            "the task needs and write a one-paragraph plan.\n\n"
+        manifest = "\n".join(
+            f"{name}: {', '.join(sorted(worker.allowed_tools)) or 'coordination only'}"
+            for name, worker in self._workers.items()
+        )
+        return (
+            f"You are the supervisor of a small agent team. {self.mandate}\n\n"
             f"{SECURITY_PREAMBLE}\n\n"
             f"Available workers: {roster}. You may only name workers from that list.\n"
+            f"Capability manifest (authoritative):\nsupervisor: coordination only\n{manifest}\n"
+            "Never assign implementation or writing to an agent lacking filesystem.write. "
+            "Researcher inspects and returns findings/context; coder modifies files; reviewer "
+            "validates without modifying. Select workers in that order when all are needed. "
+            "Do not plan actions outside declared capabilities.\n"
+            "For necessary current public information, use up to 3 structured web_requests "
+            "with operation and query or URL. Never include local paths, source code, secrets "
+            "or the task prompt. Web executes only those requests; it does not plan.\n"
             'Reply with JSON only: {"workers": ["<name>", ...], "plan": "<paragraph>"}'
         )
+
+    async def _plan(self, *, task_id: str, goal: str) -> SupervisorPlan:
+        system = self.system_prompt()
         try:
             raw = await self._ask_model(
                 system=system,
@@ -108,15 +266,21 @@ class SupervisorAgent(BaseAgent):
                 step=1,
                 goal=goal,
             )
-        except ModelError as exc:
-            return SupervisorPlan(workers=[], plan=f"planning failed ({exc}); using defaults")
+        except ModelError:
+            raise
 
         payload = extract_json_object(raw)
         if payload is None:
+            await self.events.emit(
+                EventType.MODEL_INVALID_RESPONSE, task_id=task_id, actor=self.name
+            )
             return SupervisorPlan(workers=[], plan="model returned no usable plan")
         try:
             return SupervisorPlan.model_validate(payload)
         except ValidationError:
+            await self.events.emit(
+                EventType.MODEL_INVALID_RESPONSE, task_id=task_id, actor=self.name
+            )
             return SupervisorPlan(workers=[], plan="model returned an invalid plan")
 
     @staticmethod

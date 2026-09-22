@@ -1,0 +1,51 @@
+{
+  "profiles": {
+    "fast-local": {
+      "provider": "local",
+      "model": "qwen3:8b",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key_env": null,
+      "max_tokens": 8192,
+      "temperature": 0.0,
+      "timeout_seconds": 240,
+      "retry_count": 2,
+      "structured_output": "schema",
+      "local_server": "ollama",
+      "reasoning_effort": "none"
+    },
+    "coder-local": {
+      "provider": "local",
+      "model": "qwen3-coder:30b",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key_env": null,
+      "max_tokens": 8192,
+      "temperature": 0.0,
+      "timeout_seconds": 240.0,
+      "retry_count": 2,
+      "structured_output": "schema",
+      "local_server": "ollama"
+    }
+  },
+  "agents": {
+    "supervisor": {
+      "profile": "fast-local",
+      "mandate": null,
+      "max_steps": 4
+    },
+    "researcher": {
+      "profile": "fast-local",
+      "mandate": null,
+      "max_steps": 10
+    },
+    "coder": {
+      "profile": "coder-local",
+      "mandate": null,
+      "max_steps": 16
+    },
+    "reviewer": {
+      "profile": "fast-local",
+      "mandate": null,
+      "max_steps": 10
+    }
+  }
+}

@@ -42,17 +42,13 @@ def default_suites() -> dict[str, list[str]]:
 class CommandRunner(Protocol):
     """Injected so tests never actually spawn a subprocess."""
 
-    async def run(
-        self, argv: list[str], *, cwd: Path, timeout: int
-    ) -> tuple[int, str, str]: ...
+    async def run(self, argv: list[str], *, cwd: Path, timeout: int) -> tuple[int, str, str]: ...
 
 
 class SubprocessRunner:
     """The real runner: no shell, explicit argv, hard timeout, captured output."""
 
-    async def run(
-        self, argv: list[str], *, cwd: Path, timeout: int
-    ) -> tuple[int, str, str]:
+    async def run(self, argv: list[str], *, cwd: Path, timeout: int) -> tuple[int, str, str]:
         process = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
@@ -65,6 +61,11 @@ class SubprocessRunner:
             process.kill()
             await process.wait()
             raise ToolExecutionError(f"command timed out after {timeout}s") from None
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            raise
         return (
             process.returncode or 0,
             stdout.decode("utf-8", errors="replace"),

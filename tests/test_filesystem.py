@@ -19,7 +19,9 @@ from app.tools.filesystem import (
 async def test_read_inside_the_workspace(workspace: Workspace) -> None:
     tools = FilesystemTools(workspace)
     result = await tools.read(ReadArgs(path="README.md"))
-    assert result["content"] == "# workspace\n"
+    # Byte-offset pagination preserves the file's actual newline bytes.
+    assert result["content"] == (workspace.root / "README.md").read_bytes().decode("utf-8")
+    assert result["complete"] is True
     assert result["path"] == "README.md"
 
 
@@ -64,7 +66,12 @@ def test_symlink_out_of_the_workspace_is_rejected(
     """Containment is checked after resolution, so a symlink cannot smuggle."""
     secret = tmp_path / "secret.txt"
     secret.write_text("classified")
-    (workspace.root / "link.txt").symlink_to(secret)
+    try:
+        (workspace.root / "link.txt").symlink_to(secret)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows account lacks symlink creation privilege")
+        raise
 
     with pytest.raises(ToolExecutionError, match="escapes the workspace"):
         workspace.resolve("link.txt")

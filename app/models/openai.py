@@ -29,7 +29,7 @@ class OpenAIProvider(CloudModelProvider):
                 raise MissingCredentialError(
                     "OPENAI_API_KEY is required when MODEL_PROVIDER=openai"
                 )
-            client = openai.AsyncOpenAI(api_key=api_key.get_secret_value())
+            client = openai.AsyncOpenAI(api_key=api_key.get_secret_value(), max_retries=0)
         self._client = client
 
     async def generate(self, request: ModelRequest) -> ModelResponse:

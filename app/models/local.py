@@ -43,6 +43,7 @@ class LocalModelProvider(BaseModelProvider):
             # Many local servers ignore the key but the SDK requires a non-empty
             # string, hence the placeholder default in .env.example.
             client = openai.AsyncOpenAI(
+                max_retries=0,
                 base_url=base_url,
                 api_key=api_key.get_secret_value() or "not-needed",
             )

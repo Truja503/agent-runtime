@@ -29,3 +29,8 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+.venv-control/
+ui/node_modules/
+ui/dist/
+ui/test-results/
+ui/playwright-report/
