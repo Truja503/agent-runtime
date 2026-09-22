@@ -31,6 +31,10 @@ class ModelResponseError(ModelError):
     """The provider answered, but the answer could not be interpreted."""
 
 
+class ModelOutputLimitError(ModelResponseError):
+    """The output budget ended before a usable answer was produced."""
+
+
 class ToolError(Exception):
     """Base class for tool failures."""
 

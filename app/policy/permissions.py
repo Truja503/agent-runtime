@@ -21,6 +21,9 @@ class Capability(StrEnum):
     FILESYSTEM_WRITE = "filesystem.write"
     TESTS_RUN = "tests.run"
     GITHUB_READ = "github.read"
+    WEB_REQUEST = "web.request"
+    WEB_ACCESS = "web.access"
+    BROWSER_LOCAL = "browser.local"
     #: The right to *ask* for a privileged action. Not the right to perform one.
     PRIVILEGED_REQUEST = "privileged.request"
 
@@ -49,6 +52,7 @@ class AgentRole(StrEnum):
     RESEARCHER = "researcher"
     CODER = "coder"
     REVIEWER = "reviewer"
+    WEB = "web"
 
 
 #: The authorisation table. A role gets exactly what its job needs.
@@ -56,20 +60,24 @@ ROLE_PERMISSIONS: dict[AgentRole, frozenset[Capability]] = {
     # The supervisor coordinates. It plans and delegates; it touches nothing.
     AgentRole.SUPERVISOR: frozenset(),
     AgentRole.RESEARCHER: frozenset(
-        {Capability.FILESYSTEM_READ, Capability.GITHUB_READ}
+        {Capability.FILESYSTEM_READ, Capability.GITHUB_READ, Capability.WEB_REQUEST}
     ),
     AgentRole.CODER: frozenset(
         {
             Capability.FILESYSTEM_READ,
             Capability.FILESYSTEM_WRITE,
             Capability.TESTS_RUN,
+            Capability.BROWSER_LOCAL,
             # A coder may *request* a privileged action (e.g. "restart nginx").
             # Requesting creates a pending record; it never executes anything.
             Capability.PRIVILEGED_REQUEST,
         }
     ),
     # The reviewer inspects and validates. Read plus tests, no write.
-    AgentRole.REVIEWER: frozenset({Capability.FILESYSTEM_READ, Capability.TESTS_RUN}),
+    AgentRole.REVIEWER: frozenset(
+        {Capability.FILESYSTEM_READ, Capability.TESTS_RUN, Capability.BROWSER_LOCAL}
+    ),
+    AgentRole.WEB: frozenset({Capability.WEB_ACCESS}),
 }
 
 #: A second, independent bound. Even if a permission were mistakenly granted,
@@ -79,6 +87,7 @@ ROLE_RISK_CEILING: dict[AgentRole, RiskLevel] = {
     AgentRole.RESEARCHER: RiskLevel.LOW,
     AgentRole.CODER: RiskLevel.HIGH,
     AgentRole.REVIEWER: RiskLevel.MEDIUM,
+    AgentRole.WEB: RiskLevel.LOW,
 }
 
 

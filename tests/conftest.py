@@ -68,6 +68,7 @@ def settings(tmp_path: Path, workspace: Workspace) -> Settings:
         api_tokens=f"tester:operator:{API_TOKEN},watcher:viewer:{VIEWER_TOKEN}",
         privileged_operators=f"{OPERATOR_ID}:{hash_secret(OPERATOR_SECRET)}",
         privileged_api_enabled=False,
+        internet_access_enabled=False,
     )
 
 

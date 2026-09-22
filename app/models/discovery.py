@@ -28,23 +28,25 @@ async def discover(
             models = []
             for item in entries[:100]:
                 name = item["name"]
-                capabilities = []
-                try:
-                    details = await http.post(base + "/api/show", json={"model": name})
-                    details.raise_for_status()
-                    capabilities = details.json().get("capabilities", [])
-                except (httpx.HTTPError, ValueError, TypeError):
-                    pass
-                embedding = (
-                    "embedding" in capabilities
-                    and "completion" not in capabilities
-                    or any(s in name.lower() for s in ("embed", "bge-", "e5-"))
+                capabilities = item.get("capabilities", [])
+                if not capabilities:
+                    try:
+                        details = await http.post(base + "/api/show", json={"model": name})
+                        details.raise_for_status()
+                        capabilities = details.json().get("capabilities", [])
+                    except (httpx.HTTPError, ValueError, TypeError):
+                        pass
+                chat_capable = (
+                    True
+                    if "completion" in capabilities
+                    else (False if "embedding" in capabilities else None)
                 )
                 models.append(
                     {
                         "name": name,
                         "size": item.get("size"),
-                        "chat_capable": not embedding,
+                        "chat_capable": chat_capable,
+                        "capability_source": "provider" if capabilities else "unknown",
                         "capabilities": capabilities,
                         "available": True,
                     }
@@ -56,9 +58,9 @@ async def discover(
                 {
                     "name": item["id"],
                     "available": True,
-                    "chat_capable": not any(
-                        s in item["id"].lower() for s in ("embed", "bge-", "e5-")
-                    ),
+                    "chat_capable": None,
+                    "capabilities": [],
+                    "capability_source": "unknown",
                 }
                 for item in response.json()["data"][:100]
             ]

@@ -13,7 +13,7 @@ from app.api.deps import get_runtime
 from app.api.schemas import CreateTaskRequest, EventResponse, TaskResponse
 from app.container import Runtime
 from app.errors import InvalidTaskTransitionError, TaskNotFoundError
-from app.tasks.state import TaskOptions
+from app.tasks.state import TaskOptions, TaskStatus
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -45,6 +45,7 @@ async def list_tasks(
     runtime: Runtime = Depends(get_runtime),
     _: ApiCaller = Depends(current_caller),
 ) -> list[TaskResponse]:
+    await runtime.reconcile_approvals()
     tasks = await runtime.tasks.list_tasks(limit)
     return [TaskResponse.of(task) for task in tasks]
 
@@ -56,6 +57,7 @@ async def get_task(
     _: ApiCaller = Depends(current_caller),
 ) -> TaskResponse:
     try:
+        await runtime.reconcile_approvals()
         task = await runtime.tasks.get(task_id)
     except TaskNotFoundError:
         raise HTTPException(status_code=404, detail="task not found") from None
@@ -88,3 +90,33 @@ async def cancel_task(
     except InvalidTaskTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     return TaskResponse.of(task)
+
+
+@router.post("/{task_id}/resume", response_model=TaskResponse)
+async def resume_task(
+    task_id: str,
+    runtime: Runtime = Depends(get_runtime),
+    _: ApiCaller = Depends(require_operator),
+) -> TaskResponse:
+    try:
+        task = await runtime.tasks.get(task_id)
+        if task.status not in {TaskStatus.PAUSED, TaskStatus.STALLED} or task_id in runtime._jobs:
+            raise HTTPException(409, "task is not paused/stalled")
+        for request_id in (task.result or {}).get("pending_approvals", []):
+            ticket = await runtime.privileged_gateway.status(request_id)
+            if ticket and ticket.status == "awaiting_approval":
+                raise HTTPException(409, "operator approval remains pending")
+        await runtime.tasks.record_result(
+            task_id,
+            {
+                **(task.result or {}),
+                "workflow": (task.result or {}).get("workflow") or {"stage": "recoverable"},
+                "resume_requested": True,
+            },
+        )
+        runtime.broker.cancelled_tasks.discard(task_id)
+        task = await runtime.tasks.transition(task_id, TaskStatus.CREATED)
+        runtime.schedule_task(task_id)
+        return TaskResponse.of(task)
+    except TaskNotFoundError:
+        raise HTTPException(404, "task not found") from None

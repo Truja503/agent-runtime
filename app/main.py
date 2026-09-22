@@ -35,6 +35,7 @@ def create_app(settings: Settings | None = None, runtime: Runtime | None = None)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await built.start()
         yield
         await built.aclose()
 

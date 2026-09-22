@@ -42,7 +42,9 @@ class EventType(StrEnum):
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
     TASK_CANCELLED = "task_cancelled"
+    TASK_INTERRUPTED = "task_interrupted"
     TASK_STATUS_CHANGED = "task_status_changed"
+    WORKFLOW_CYCLE = "workflow_cycle"
 
     AGENT_STARTED = "agent_started"
     AGENT_COMPLETED = "agent_completed"
@@ -56,6 +58,7 @@ class EventType(StrEnum):
     MODEL_FAILED = "model_failed"
     MODEL_INVALID_RESPONSE = "model_invalid_response"
     CONFIGURATION_CHANGED = "configuration_changed"
+    WEB_EGRESS = "web_egress"
 
     TOOL_REQUESTED = "tool_requested"
     TOOL_ALLOWED = "tool_allowed"
@@ -73,6 +76,12 @@ class EventType(StrEnum):
 def redact(value: Any, *, key: str = "") -> Any:
     """Return a version of ``value`` that is safe to persist."""
     lowered = key.lower()
+    if lowered == "external_data_sent" and isinstance(value, str):
+        return value[:2048]
+    if lowered in {"input_tokens", "output_tokens"} and type(value) is int:
+        return value
+    if lowered in {"input_tokens", "output_tokens"} and type(value) is int:
+        return value
     if any(marker in lowered for marker in _SENSITIVE_KEY_MARKERS):
         return "[redacted]"
     if isinstance(value, dict):

@@ -98,10 +98,22 @@ class PrivilegedRequestService:
         return request
 
     async def get_request(self, request_id: str) -> PrivilegedRequest | None:
-        return await self._store.get(request_id)
+        request = await self._store.get(request_id)
+        if request and request.status == RequestStatus.AWAITING_APPROVAL and request.is_expired():
+            request.status = RequestStatus.EXPIRED
+            request.reason = "approval_expired"
+            request.decided_at = datetime.now(UTC)
+            await self._store.save(request)
+        return request
 
     async def list_pending(self, limit: int = 50) -> list[PrivilegedRequest]:
-        return await self._store.list_by_status(RequestStatus.AWAITING_APPROVAL, limit)
+        pending = await self._store.list_by_status(RequestStatus.AWAITING_APPROVAL, limit)
+        return [
+            r
+            for item in pending
+            if (r := await self.get_request(item.request_id))
+            and r.status == RequestStatus.AWAITING_APPROVAL
+        ]
 
     # -- operator-only -----------------------------------------------------
 
@@ -133,7 +145,8 @@ class PrivilegedRequestService:
             await self._audit.record(
                 "privileged_action_denied",
                 {
-                    "request_id": request_id, "task_id": request.task_id,
+                    "request_id": request_id,
+                    "task_id": request.task_id,
                     "operator": operator.operator_id,
                     "reason": str(exc),
                 },
@@ -143,7 +156,8 @@ class PrivilegedRequestService:
         await self._audit.record(
             "privileged_action_approved",
             {
-                "request_id": request_id, "task_id": request.task_id,
+                "request_id": request_id,
+                "task_id": request.task_id,
                 "operator": operator.operator_id,
                 "action": intent.action.value,
                 "service": intent.service,
@@ -170,11 +184,10 @@ class PrivilegedRequestService:
         request.status = RequestStatus.EXECUTED if result.succeeded else RequestStatus.FAILED
         await self._store.save(request)
         await self._audit.record(
-            "privileged_action_executed"
-            if result.succeeded
-            else "privileged_action_failed",
+            "privileged_action_executed" if result.succeeded else "privileged_action_failed",
             {
-                "request_id": request_id, "task_id": request.task_id,
+                "request_id": request_id,
+                "task_id": request.task_id,
                 "operator": operator.operator_id,
                 "action": intent.action.value,
                 "service": intent.service,
@@ -203,7 +216,8 @@ class PrivilegedRequestService:
         await self._audit.record(
             "privileged_action_denied",
             {
-                "request_id": request_id, "task_id": request.task_id,
+                "request_id": request_id,
+                "task_id": request.task_id,
                 "operator": operator.operator_id,
                 "reason": request.reason,
             },

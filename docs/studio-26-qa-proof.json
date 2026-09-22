@@ -1,0 +1,58 @@
+{
+  "timestamp": "2026-09-21T20:18:43.037435+00:00",
+  "caller_loop": "_WindowsSelectorEventLoop",
+  "readiness": {
+    "status": "READY",
+    "playwright_python_installed": true,
+    "chromium_installed": true,
+    "chromium_executable": "C:\\Users\\rodri\\AppData\\Local\\ms-playwright\\chromium-1243\\chrome-win64\\chrome.exe",
+    "launch_test": true,
+    "error": null
+  },
+  "source_hashes_before_and_after": {
+    "app.js": "b286427d7cde1c4e082d029fbf37af4fa8e11250804381ca87dcade0a7e4ab0c",
+    "index.html": "48a9ad3073602c55526f764b263587a4c6aba987114255b9dd9296178e739608",
+    "research.md": "c6c44eb50c25628422218fe4e0184dacc4757fcb0dc0feec9583c69d9bd952db",
+    "styles.css": "b309bbfdf43a368e50df1bcfd08f5d219a00585427743d9091266219376b5b1a"
+  },
+  "sources_unchanged_during_capture": true,
+  "artifacts": {
+    "desktop.png": {
+      "bytes": 103323,
+      "sha256": "f93245de740811d30d22cd2c0507b1a4a5e6893597cd1dce8a6c237ca2a28cdd",
+      "dimensions": [
+        1440,
+        1000
+      ]
+    },
+    "mobile.png": {
+      "bytes": 35810,
+      "sha256": "15ccc9666c297530fcd1b73b29c148e8f3f0d6b1573a34cfda97d92df3610a87",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    "report.json": {
+      "bytes": 17071,
+      "sha256": "3b1c1abe8c7927c343fabb6333993d9ae9de7b172f11541c0d4edcb50d1a0d18"
+    }
+  },
+  "console_error_counts": {
+    "desktop": 7,
+    "mobile": 7
+  },
+  "failed_resource_counts": {
+    "desktop": 6,
+    "mobile": 6
+  },
+  "horizontal_overflow": {
+    "desktop": false,
+    "mobile": false
+  },
+  "scroll_height": {
+    "desktop": 8487,
+    "mobile": 9575
+  },
+  "limitation": "CDN dependencies blocked by existing local-only policy; Lenis is not defined. Website not modified."
+}

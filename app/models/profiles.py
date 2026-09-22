@@ -31,6 +31,17 @@ class ModelProfile(BaseModel):
     retry_count: int = Field(default=2, ge=0, le=5)
     structured_output: Literal["schema", "json", "off"] = "schema"
     local_server: Literal["ollama", "compatible"] = "ollama"
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+    supports_images: bool = False
+
+    @model_validator(mode="after")
+    def validate_reasoning_support(self) -> ModelProfile:
+        if self.reasoning_effort is not None and self.provider not in {
+            ProviderKind.LOCAL,
+            ProviderKind.OPENAI,
+        }:
+            raise ValueError("reasoning effort is supported only for OpenAI-compatible profiles")
+        return self
 
     @field_validator("base_url")
     @classmethod
@@ -67,6 +78,7 @@ class AgentProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     profile: str
     mandate: str | None = Field(default=None, max_length=8000)
+    max_steps: int | None = Field(default=None, ge=1, le=50)
 
 
 class ModelConfiguration(BaseModel):
@@ -142,6 +154,18 @@ class ModelPool:
 
     def profile_for(self, role: str) -> ModelProfile:
         return self.configuration.profiles[self.configuration.agents[role].profile]
+
+    def steps_for(self, role: str) -> int:
+        configured = self.configuration.agents[role].max_steps
+        if configured is not None:
+            return configured
+        field = f"{role}_max_steps"
+        if (
+            field not in self.settings.model_fields_set
+            and "default_max_steps" in self.settings.model_fields_set
+        ):
+            return self.settings.default_max_steps
+        return int(getattr(self.settings, field))
 
     def get(self, profile_name: str) -> ModelProvider:
         if self._injected is not None:

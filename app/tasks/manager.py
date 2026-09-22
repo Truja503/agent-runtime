@@ -8,7 +8,14 @@ from typing import Any
 
 from app.errors import InvalidTaskTransitionError, TaskNotFoundError
 from app.observability.events import Event, EventBus, EventType
-from app.tasks.state import Task, TaskOptions, TaskStatus, TaskStore, can_transition
+from app.tasks.state import (
+    RECOVERABLE_STATUSES,
+    Task,
+    TaskOptions,
+    TaskStatus,
+    TaskStore,
+    can_transition,
+)
 
 
 class TaskManager:
@@ -39,6 +46,9 @@ class TaskManager:
     async def list_tasks(self, limit: int = 50) -> list[Task]:
         return await self._store.list_tasks(limit)
 
+    async def waiting_tasks(self) -> list[Task]:
+        return await self._store.list_by_status(frozenset({TaskStatus.WAITING_FOR_APPROVAL}))
+
     async def transition(self, task_id: str, target: TaskStatus) -> Task:
         task = await self.get(task_id)
         if task.status is target:
@@ -49,6 +59,8 @@ class TaskManager:
             )
         previous = task.status
         task.status = target
+        if target == TaskStatus.CREATED:
+            task.error = None
         task.updated_at = datetime.now(UTC)
         await self._store.update(task)
         await self._events.emit(
@@ -91,6 +103,7 @@ class TaskManager:
     async def record_result(self, task_id: str, result: dict[str, Any]) -> None:
         task = await self.get(task_id)
         task.result = result
+        task.updated_at = datetime.now(UTC)
         await self._store.update(task)
 
     async def cancel(self, task_id: str, *, actor: str) -> Task:
@@ -111,3 +124,32 @@ class TaskManager:
     async def events_for(self, task_id: str) -> list[Event]:
         await self.get(task_id)  # 404 rather than an empty list for an unknown id
         return await self._events.list_for_task(task_id)
+
+    async def reconcile_startup(self) -> int:
+        """A new process owns no previous asyncio jobs. Never pretend to resume."""
+        count = 0
+        while batch := await self._store.list_by_status(RECOVERABLE_STATUSES):
+            for task in batch:
+                previous = task.status
+                task.status = (
+                    TaskStatus.PAUSED
+                    if task.options.recoverable_execution
+                    else TaskStatus.INTERRUPTED
+                )
+                task.error = "Runtime restarted before task completion."
+                task.updated_at = datetime.now(UTC)
+                await self._store.update(task)
+                await self._events.emit(
+                    EventType.TASK_INTERRUPTED,
+                    task_id=task.id,
+                    actor="task_manager",
+                    previous=previous.value,
+                    current=task.status.value,
+                    reason=task.error,
+                )
+                count += 1
+        for task in await self.waiting_tasks():
+            if task.options.recoverable_execution:
+                await self.transition(task.id, TaskStatus.PAUSED)
+                count += 1
+        return count

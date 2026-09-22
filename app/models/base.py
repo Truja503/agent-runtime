@@ -28,6 +28,8 @@ class Role(StrEnum):
 class Message(BaseModel):
     role: Role
     content: str
+    # Ephemeral generated PNGs; omitted from model_dump, prompt inspection and durable logs.
+    images: list[str] = Field(default_factory=list, exclude=True)
 
 
 class ModelRequest(BaseModel):
@@ -43,6 +45,7 @@ class ModelRequest(BaseModel):
     #: Routing/observability hints. Never sent to a provider; used for event
     #: metadata and by the offline scripted provider.
     metadata: dict[str, str] = Field(default_factory=dict)
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     response_schema: dict[str, Any] | None = None
     structured_output: Literal["schema", "json", "off"] = "off"
 

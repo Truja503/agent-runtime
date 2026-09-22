@@ -65,6 +65,9 @@ def _default_responder(request: ModelRequest) -> str:
         {
             "action": "finish",
             "summary": f"{agent or 'agent'} finished its part of: {goal}",
+            **({"review": {"verdict": "pass", "summary": "Offline scripted review only",
+                           "findings": [], "acceptance_criteria": []}}
+               if agent == "reviewer" else {}),
         }
     )
 

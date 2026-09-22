@@ -7,6 +7,7 @@ accident.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
@@ -32,13 +33,27 @@ class TaskResponse(BaseModel):
 
     @classmethod
     def of(cls, task: Task) -> TaskResponse:
+        result = deepcopy(task.result)
+        if result and isinstance(result.get("acceptance"), dict):
+            acceptance = result["acceptance"]
+            explicit = any(task.options.acceptance.model_dump().values())
+            acceptance["explicit_requirements"] = explicit
+            if not explicit:
+                acceptance["status"] = "not_evaluated"
+            elif acceptance.get("status") == "failed":
+                acceptance["status"] = "rejected"
+            stored_evidence = result.get("evidence")
+            evidence = stored_evidence if isinstance(stored_evidence, dict) else {}
+            acceptance["review_inspection"] = (
+                "evidence_present" if evidence.get("reviewer_inspected_files") else "unverified"
+            )
         return cls(
             id=task.id,
             goal=task.goal,
             status=task.status.value,
             created_at=task.created_at,
             updated_at=task.updated_at,
-            result=task.result,
+            result=result,
             error=task.error,
             options=task.options,
         )

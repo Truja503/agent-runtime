@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 
 from app.policy.permissions import Capability, RiskLevel
+from app.tools.browser import BrowserArgs, BrowserTools
 from app.tools.filesystem import (
     FilesystemTools,
     ListArgs,
@@ -37,10 +38,28 @@ def build_registry(
         suites=test_suites,
     )
     github = GitHubTools(github_client)
+    browser = BrowserTools(workspace)
+    for name in ("browser.preview", "browser.screenshot", "browser.console_errors"):
+        registry.register(
+            name=name,
+            description=(
+                "Render a confined static project with Chromium. Fixed desktop/mobile QA, "
+                "screenshots and errors; no arbitrary browser controls. "
+                "Requires project relative path with index.html."
+            ),
+            risk=RiskLevel.MEDIUM,
+            required_permissions={Capability.BROWSER_LOCAL},
+            args_model=BrowserArgs,
+            handler=browser.capture,
+        )
 
     registry.register(
         name="filesystem.read",
-        description="Read a UTF-8 text file from the workspace.",
+        description=(
+            "Read a bounded UTF-8 file page. Optional offset (byte offset, default 0), "
+            "max_bytes (4..24000, default 12000). Follow next_offset until complete=true; "
+            "restart at zero if version changes. Paths are workspace relative."
+        ),
         risk=RiskLevel.LOW,
         required_permissions={Capability.FILESYSTEM_READ},
         args_model=ReadArgs,

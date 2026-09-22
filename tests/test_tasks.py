@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -24,7 +25,10 @@ def manager() -> TaskManager:
 def test_transition_table_is_closed_over_terminal_states() -> None:
     for status in TERMINAL_STATUSES:
         for target in TaskStatus:
-            assert not can_transition(status, target)
+            resumable = status in {TaskStatus.PAUSED, TaskStatus.STALLED}
+            assert can_transition(status, target) == (
+                resumable and target in {TaskStatus.CREATED, TaskStatus.CANCELLED}
+            )
 
 
 def test_legal_and_illegal_transitions() -> None:
@@ -123,7 +127,11 @@ async def test_task_parks_in_waiting_for_approval(runtime: Runtime) -> None:
     )
 
     task = await runtime.tasks.create("restart nginx on the box", created_by="tester")
-    await runtime.run_task(task.id)
+    job = runtime.schedule_task(task.id)
+    for _ in range(100):
+        if (await runtime.tasks.get(task.id)).status is TaskStatus.WAITING_FOR_APPROVAL:
+            break
+        await asyncio.sleep(0.01)
 
     parked = await runtime.tasks.get(task.id)
     assert parked.status is TaskStatus.WAITING_FOR_APPROVAL
@@ -131,6 +139,8 @@ async def test_task_parks_in_waiting_for_approval(runtime: Runtime) -> None:
     types = {event.type for event in await runtime.tasks.events_for(task.id)}
     assert EventType.PRIVILEGED_ACTION_REQUESTED in types
     assert EventType.PRIVILEGED_ACTION_EXECUTED not in types
+    job.cancel()
+    await asyncio.gather(job, return_exceptions=True)
 
 
 async def test_model_failure_fails_the_task_cleanly(runtime: Runtime) -> None:

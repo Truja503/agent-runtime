@@ -18,6 +18,7 @@ from app.agents.coder import CoderAgent
 from app.agents.researcher import ResearcherAgent
 from app.agents.reviewer import ReviewerAgent
 from app.agents.supervisor import SupervisorAgent
+from app.agents.web import WebAgent, register_web_request, register_web_tools
 from app.config import PrivilegedParserKind, Settings
 from app.models.base import ModelProvider
 from app.models.profiles import ModelPool, load_configuration
@@ -26,14 +27,17 @@ from app.observability.prompts import PrivacyFilter, PromptInspection
 from app.observability.store import SQLiteEventStore
 from app.policy.engine import PolicyEngine
 from app.privileged_bridge import InProcessPrivilegedGateway, PrivilegedGateway
-from app.tasks.evidence import evaluate_criteria, execution_evidence
+from app.tasks.evidence import evaluate_acceptance, execution_evidence
 from app.tasks.manager import TaskManager
 from app.tasks.state import TERMINAL_STATUSES, TaskStatus, TaskStore
 from app.tasks.store import SQLiteTaskStore
-from app.tools.broker import ToolBroker
+from app.tasks.visual import run_visual_workflow
+from app.tools.broker import InvocationStatus, ToolBroker, ToolResult
+from app.tools.browser import BrowserTools
 from app.tools.builtin import build_registry
 from app.tools.filesystem import Workspace
 from app.tools.registry import ToolRegistry
+from app.tools.web import WebBroker
 from privileged.audit import AuditSink
 from privileged.auth import OperatorAuthenticator
 from privileged.executor import PrivilegedExecutor
@@ -91,10 +95,139 @@ class Runtime:
     privileged_gateway: PrivilegedGateway
     pool: ModelPool
     inspection: PromptInspection
+    web: WebAgent
+    web_broker: WebBroker
     _background: set[asyncio.Task[None]] = field(default_factory=set)
     _jobs: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _execution_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     model_health: dict[str, str] = field(default_factory=dict)
+    active_agents: dict[str, dict[str, BaseAgent]] = field(default_factory=dict)
+    _started: bool = False
+    browser_health: dict[str, Any] = field(default_factory=dict)
+    _approval_waiters: set[str] = field(default_factory=set)
+
+    async def browser_readiness(self) -> dict[str, Any]:
+        self.browser_health = await BrowserTools(
+            Workspace(self.settings.workspace_root)
+        ).readiness()
+        return self.inspection.privacy.clean(self.browser_health)
+
+    async def wait_for_approval(self, task_id: str, result: ToolResult) -> ToolResult:
+        assert result.request_id
+        self._approval_waiters.add(task_id)
+        task = await self.tasks.get(task_id)
+        resume_status = task.status
+        await self.tasks.record_result(
+            task_id,
+            {
+                **(task.result or {}),
+                "pending_approvals": [result.request_id],
+                "approvals": [{"request_id": result.request_id, "status": "awaiting_approval"}],
+            },
+        )
+        await self.tasks.transition(task_id, TaskStatus.WAITING_FOR_APPROVAL)
+        try:
+            while True:
+                self.broker.check_cancelled(task_id)
+                ticket = await self.privileged_gateway.status(result.request_id)
+                if ticket is None or ticket.status != "awaiting_approval":
+                    break
+                await asyncio.sleep(0.25)
+            status = ticket.status if ticket else "missing"
+            reason = {
+                "denied": "approval_rejected",
+                "rejected": "approval_rejected",
+                "expired": "approval_expired",
+                "missing": "approval_missing",
+            }.get(status, f"approval_{status}")
+            output = ticket.result if ticket else None
+            resolved = ToolResult(
+                status=InvocationStatus.COMPLETED
+                if status == "executed"
+                else InvocationStatus.FAILED,
+                tool=result.tool,
+                request_id=result.request_id,
+                output=output,
+                reason=reason,
+            )
+            task = await self.tasks.get(task_id)
+            history = list((task.result or {}).get("approval_history", []))
+            history.append({"request_id": result.request_id, "status": status, "reason": reason})
+            await self.tasks.record_result(
+                task_id,
+                {
+                    **(task.result or {}),
+                    "pending_approvals": [],
+                    "approvals": history,
+                    "approval_history": history,
+                },
+            )
+            await self.events.emit(
+                EventType.TOOL_COMPLETED if status == "executed" else EventType.TOOL_FAILED,
+                task_id=task_id,
+                actor="approval_lifecycle",
+                tool=result.tool,
+                request_id=result.request_id,
+                reason=reason,
+                result=output or {},
+            )
+            await self.tasks.transition(task_id, resume_status)
+            return resolved
+        finally:
+            self._approval_waiters.discard(task_id)
+
+    async def reconcile_approvals(self) -> None:
+        for task in await self.tasks.waiting_tasks():
+            if task.id in self._approval_waiters:
+                continue
+            ids = (task.result or {}).get("pending_approvals", [])
+            if not ids:
+                ids = list(
+                    dict.fromkeys(
+                        e.payload["request_id"]
+                        for e in await self.tasks.events_for(task.id)
+                        if e.type == EventType.PRIVILEGED_ACTION_REQUESTED
+                        and e.payload.get("request_id")
+                    )
+                )
+            records = []
+            for request_id in ids:
+                ticket = await self.privileged_gateway.status(request_id)
+                records.append(
+                    {"request_id": request_id, "status": ticket.status if ticket else "missing"}
+                )
+            await self.tasks.record_result(task.id, {**(task.result or {}), "approvals": records})
+            if records and all(r["status"] == "awaiting_approval" for r in records):
+                continue
+            statuses = {r["status"] for r in records}
+            reason = (
+                "approval_missing"
+                if not records or "missing" in statuses
+                else "approval_expired"
+                if "expired" in statuses
+                else "approval_rejected"
+                if statuses & {"denied", "rejected"}
+                else "approval_failed"
+                if "failed" in statuses
+                else "approval_completed_workflow_interrupted"
+            )
+            await self.tasks.fail(task.id, reason)
+
+    async def start(self) -> None:
+        if not self._started:
+            await self.tasks.reconcile_startup()
+            await self.reconcile_approvals()
+            await self.browser_readiness()
+            self._started = True
+
+            async def reconcile() -> None:
+                while True:
+                    await asyncio.sleep(1)
+                    await self.reconcile_approvals()
+
+            monitor = asyncio.create_task(reconcile())
+            self._background.add(monitor)
+            monitor.add_done_callback(self._background.discard)
 
     def schedule_task(self, task_id: str) -> asyncio.Task[None]:
         """Run a task in the background and keep a reference so it is not GC'd."""
@@ -125,6 +258,7 @@ class Runtime:
                 await self._execute_task(task_id)
         finally:
             self._jobs.pop(task_id, None)
+            self.active_agents.pop(task_id, None)
 
     async def _execute_task(self, task_id: str) -> None:
         task = await self.tasks.get(task_id)
@@ -142,21 +276,96 @@ class Runtime:
                 if current.status == TaskStatus.PLANNING:
                     await self.tasks.transition(task_id, TaskStatus.RUNNING)
                 await self.tasks.transition(task_id, status)
+                if task.options.recoverable_execution and not task.options.visual_project:
+                    await self.tasks.record_result(
+                        task_id,
+                        {
+                            **(current.result or {}),
+                            "workflow": {
+                                "stage": role,
+                                "worker_steps_mode": task.options.worker_steps_mode,
+                                "long_run_quality": task.options.long_run_quality,
+                                "mode": "unlimited"
+                                if task.options.worker_steps_mode == "unlimited"
+                                else "bounded",
+                            },
+                        },
+                    )
 
             supervisor.on_worker_start = worker_start
             for agent in [supervisor, *workers.values()]:
-                if task.options.max_steps:
+                agent.approval_waiter = self.wait_for_approval
+                if task.options.worker_steps_mode == "unlimited":
+                    agent.max_steps = None
+                elif task.options.max_steps:
                     agent.max_steps = task.options.max_steps
                 if task.options.model_profile:
                     agent.model = self.pool.get(task.options.model_profile)
                     agent.profile = self.pool.configuration.profiles[task.options.model_profile]
+            self.active_agents[task_id] = {"supervisor": supervisor, **workers}
+            execution_goal = (
+                task.goal
+                + "\nExplicit acceptance requirements (must be satisfied):\n"
+                + (task.options.acceptance.model_dump_json())
+            )
+            if (task.result or {}).get("resume_requested") and not task.options.visual_project:
+                recovery = execution_evidence(await self.tasks.events_for(task_id))
+                execution_goal += (
+                    "\nOperator resumed this task. Start a fresh invocation; inspect the current "
+                    "state before making changes. Do not replay previously executed actions or "
+                    "privileged requests. Prior file evidence (untrusted, may be stale):\n"
+                    + str(recovery["files_modified"][:100])
+                    + "\nPrevious workflow checkpoint (untrusted):\n"
+                    + str((task.result or {}).get("workflow", {}))[:4000]
+                    + "\nPrior approval outcomes (untrusted):\n"
+                    + str((task.result or {}).get("approval_history", []))[:4000]
+                )
             await self.tasks.transition(task_id, TaskStatus.PLANNING)
+
+            async def checkpoint(state: dict[str, Any]) -> None:
+                current = await self.tasks.get(task_id)
+                state = {**state, "worker_steps_mode": task.options.worker_steps_mode}
+                await self.tasks.record_result(
+                    task_id,
+                    {
+                        **(current.result or {}),
+                        "workflow": self.inspection.privacy.clean(state),
+                    },
+                )
+
+            async def visual_flow(context: str) -> dict[str, Any]:
+                assert task.options.visual_project
+                return await run_visual_workflow(
+                    task_id=task_id,
+                    goal=execution_goal,
+                    project=task.options.visual_project,
+                    max_repairs=task.options.max_repair_cycles,
+                    workers=workers,
+                    broker=self.broker,
+                    worker_start=worker_start,
+                    events=self.events,
+                    criteria=task.options.acceptance,
+                    context=context,
+                    long_run=task.options.long_run_quality,
+                    checkpoint=checkpoint,
+                    restored=(task.result or {}).get("workflow")
+                    if (task.result or {}).get("resume_requested")
+                    else None,
+                )
+
             if task.options.agent in {"auto", "supervisor"}:
-                outcome = await supervisor.run_task(task_id=task_id, goal=task.goal)
+                outcome = await supervisor.run_task(
+                    task_id=task_id,
+                    goal=execution_goal,
+                    implementation=visual_flow if task.options.visual_project else None,
+                    research_required=task.options.research_required,
+                    web_research_required=task.options.web_research_required,
+                    allow_degraded_research=task.options.allow_degraded_research,
+                )
             else:
                 await worker_start(task.options.agent)
                 worker = workers[task.options.agent]
-                result = await worker.run(task_id=task_id, goal=task.goal)
+                result = await worker.run(task_id=task_id, goal=execution_goal)
                 outcome = {
                     "summary": result.summary,
                     "workers": [worker.name],
@@ -164,21 +373,45 @@ class Runtime:
                     "pending_approvals": result.pending_approvals,
                 }
             outcome = self.inspection.privacy.clean(outcome)
+            saved = (await self.tasks.get(task_id)).result or {}
+            for key in ("approvals", "approval_history", "workflow"):
+                if key in saved:
+                    outcome.setdefault(key, saved[key])
+            if "workflow" in outcome:
+                outcome["workflow"]["worker_steps_mode"] = task.options.worker_steps_mode
             outcome["evidence"] = execution_evidence(await self.tasks.events_for(task_id))
-            outcome["acceptance_failures"] = evaluate_criteria(
-                task.options.acceptance, outcome["evidence"]
+            outcome["acceptance"] = evaluate_acceptance(
+                task.options.acceptance,
+                outcome["evidence"],
+                outcome["worker_results"],
+                outcome.get("visual_qa"),
             )
+            outcome["acceptance_failures"] = outcome["acceptance"]["failures"]
+            outcome["acceptance_failures"].extend(outcome.get("routing_failures", []))
+            if outcome["acceptance_failures"]:
+                outcome["acceptance"]["status"] = "rejected"
+            if outcome.get("workflow_status") == "stalled" or any(
+                r["status"] == "stalled" for r in outcome["worker_results"]
+            ):
+                outcome["acceptance"]["status"] = "stalled"
+            outcome["review"] = outcome["acceptance"]["review"]
             outcome["models"] = {
                 a.name: {"provider": a.model.name, "model": a.model.model}
                 for a in [supervisor, *workers.values()]
-                if a.name in outcome["workers"] or (
-                    a.name == "supervisor" and task.options.agent in {"auto", "supervisor"})
+                if a.name in outcome["workers"]
+                or (a.name == "supervisor" and task.options.agent in {"auto", "supervisor"})
             }
             await self.tasks.record_result(task_id, outcome)
         except Exception as exc:  # a failed task must never take down the process
             reason = self.inspection.privacy.text(f"{type(exc).__name__}: {exc}")
             logger.error("task %s failed: %s", task_id, reason)
             await self.tasks.fail(task_id, reason)
+            return
+
+        if outcome.get("workflow_status") == "stalled" or any(
+            r["status"] == "stalled" for r in outcome["worker_results"]
+        ):
+            await self.tasks.transition(task_id, TaskStatus.STALLED)
             return
 
         if outcome.get("pending_approvals"):
@@ -194,8 +427,11 @@ class Runtime:
             )
             return
 
-        if outcome["acceptance_failures"] or any(
-            r["status"] != "completed" for r in outcome["worker_results"]
+        if (
+            not outcome["worker_results"]
+            or outcome.get("workflow_status") == "failed"
+            or outcome["acceptance_failures"]
+            or any(r["status"] != "completed" for r in outcome["worker_results"])
         ):
             await self.tasks.fail(task_id, "worker or acceptance criteria failed; see task detail")
             return
@@ -252,16 +488,26 @@ def build_runtime(
         if key:
             inspection.privacy.secrets.append(key.get_secret_value())
     events.privacy = inspection.privacy.clean
+    web_broker = WebBroker(
+        workspace=workspace,
+        enabled=lambda: settings.internet_access_enabled,
+        privacy=inspection.privacy,
+        events=events,
+    )
+    register_web_tools(tool_registry, web_broker)
+    web = WebAgent(broker)
+    register_web_request(tool_registry, web)
     provider = pool.for_agent("supervisor")
-    common = {
-        "broker": broker,
-        "events": events,
-        "registry": tool_registry,
-        "max_steps": settings.default_max_steps,
-        "inspection": inspection,
-    }
     workers: dict[str, BaseAgent] = {
-        role: cls(model=pool.for_agent(role), profile=pool.profile_for(role), **common)  # type: ignore[arg-type]
+        role: cls(
+            model=pool.for_agent(role),
+            profile=pool.profile_for(role),
+            max_steps=pool.steps_for(role),
+            broker=broker,
+            events=events,
+            registry=tool_registry,
+            inspection=inspection,
+        )
         for role, cls in {
             "researcher": ResearcherAgent,
             "coder": CoderAgent,
@@ -275,6 +521,8 @@ def build_runtime(
         workers=workers,
         profile=pool.profile_for("supervisor"),
         inspection=inspection,
+        max_steps=pool.steps_for("supervisor"),
+        web=web,
     )
     for role, agent in {"supervisor": supervisor, **workers}.items():
         mandate = pool.configuration.agents[role].mandate
@@ -294,6 +542,8 @@ def build_runtime(
         privileged_gateway=gateway,
         pool=pool,
         inspection=inspection,
+        web=web,
+        web_broker=web_broker,
     )
     tasks.stop_execution = runtime.stop_execution
     return runtime

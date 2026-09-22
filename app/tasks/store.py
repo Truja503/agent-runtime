@@ -47,6 +47,11 @@ class InMemoryTaskStore:
         ordered = sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
         return [task.model_copy(deep=True) for task in ordered[:limit]]
 
+    async def list_by_status(self, statuses: frozenset[TaskStatus], limit: int = 100) -> list[Task]:
+        return [t.model_copy(deep=True) for t in self._tasks.values() if t.status in statuses][
+            :limit
+        ]
+
 
 class SQLiteTaskStore:
     def __init__(self, path: Path) -> None:
@@ -103,6 +108,20 @@ class SQLiteTaskStore:
 
     async def list_tasks(self, limit: int = 50) -> list[Task]:
         return await asyncio.to_thread(self._list, limit)
+
+    async def list_by_status(self, statuses: frozenset[TaskStatus], limit: int = 100) -> list[Task]:
+        return await asyncio.to_thread(self._list_by_status, statuses, limit)
+
+    def _list_by_status(self, statuses: frozenset[TaskStatus], limit: int) -> list[Task]:
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        with connect(self._path) as connection:
+            rows = connection.execute(
+                f"SELECT * FROM tasks WHERE status IN ({placeholders}) LIMIT ?",  # noqa: S608
+                (*[s.value for s in statuses], limit),
+            ).fetchall()
+        return [self._task(row) for row in rows]
 
     def _list(self, limit: int) -> list[Task]:
         with connect(self._path) as connection:

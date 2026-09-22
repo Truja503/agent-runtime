@@ -19,7 +19,9 @@ from app.tools.filesystem import (
 async def test_read_inside_the_workspace(workspace: Workspace) -> None:
     tools = FilesystemTools(workspace)
     result = await tools.read(ReadArgs(path="README.md"))
-    assert result["content"] == "# workspace\n"
+    # Byte-offset pagination preserves the file's actual newline bytes.
+    assert result["content"] == (workspace.root / "README.md").read_bytes().decode("utf-8")
+    assert result["complete"] is True
     assert result["path"] == "README.md"
 
 

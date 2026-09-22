@@ -91,6 +91,7 @@ class Settings(BaseSettings):
 
     # Filesystem sandbox
     workspace_root: Path = Path("./workspace")
+    internet_access_enabled: bool = False
 
     # Auth
     api_tokens: str = "dev:operator:dev-token"
@@ -100,6 +101,10 @@ class Settings(BaseSettings):
 
     # Agent execution limits
     default_max_steps: int = Field(default=6, ge=1, le=50)
+    supervisor_max_steps: int = Field(default=4, ge=1, le=50)
+    researcher_max_steps: int = Field(default=10, ge=1, le=50)
+    coder_max_steps: int = Field(default=16, ge=1, le=50)
+    reviewer_max_steps: int = Field(default=10, ge=1, le=50)
     model_max_tokens: int = Field(default=2048, ge=64, le=128_000)
     model_timeout_seconds: float = Field(default=120, gt=0, le=3600)
     model_retry_count: int = Field(default=2, ge=0, le=5)
