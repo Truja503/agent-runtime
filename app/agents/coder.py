@@ -27,6 +27,12 @@ class CoderAgent(WorkerAgent):
             "filesystem.list",
             "filesystem.write",
             "tests.run",
+            "project.inspect",
+            "project.build",
+            "project.serve",
+            "project.stop",
+            "project.test",
+            "project.dependencies",
             "browser.preview",
             "browser.screenshot",
             "browser.console_errors",
@@ -34,6 +40,11 @@ class CoderAgent(WorkerAgent):
         }
     )
     mandate = (
+        "For Flask projects declare project.json with exact versions of all dependencies, "
+        "including transitive packages; export app from app.py and put tests in tests/. "
+        "Use project.dependencies to request operator approval, project.build/project.test "
+        "for isolated execution, and browser.screenshot for route QA. Never use tests.run "
+        "for generated Flask code. No shell commands or executable selection are available. "
         "Use relative paths and . for the workspace root, never /. "
         "After the LAST write to each changed file, read all its pages back. "
         "Reserve time for required verification and a finish decision. "

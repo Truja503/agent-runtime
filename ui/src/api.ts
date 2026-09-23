@@ -9,12 +9,14 @@ export async function api<T>(
   path: string,
   method = "GET",
   data?: unknown,
+  extraHeaders: Record<string, string> = {},
 ): Promise<T> {
   const response = await fetch(`${import.meta.env.DEV ? "/api" : ""}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
+      ...extraHeaders,
     },
     body: data === undefined ? undefined : JSON.stringify(data),
   });

@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     # Model selection
     model_provider: ProviderKind = ProviderKind.SCRIPTED
     model_name: str = ""
+    project_toolchain_image: str = ""
 
     anthropic_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None

@@ -24,6 +24,8 @@ class Capability(StrEnum):
     WEB_REQUEST = "web.request"
     WEB_ACCESS = "web.access"
     BROWSER_LOCAL = "browser.local"
+    PROJECT_EXECUTE = "project.execute"
+    PROJECT_DEPENDENCIES = "project.dependencies.request"
     #: The right to *ask* for a privileged action. Not the right to perform one.
     PRIVILEGED_REQUEST = "privileged.request"
 
@@ -68,6 +70,8 @@ ROLE_PERMISSIONS: dict[AgentRole, frozenset[Capability]] = {
             Capability.FILESYSTEM_WRITE,
             Capability.TESTS_RUN,
             Capability.BROWSER_LOCAL,
+            Capability.PROJECT_EXECUTE,
+            Capability.PROJECT_DEPENDENCIES,
             # A coder may *request* a privileged action (e.g. "restart nginx").
             # Requesting creates a pending record; it never executes anything.
             Capability.PRIVILEGED_REQUEST,
@@ -75,7 +79,12 @@ ROLE_PERMISSIONS: dict[AgentRole, frozenset[Capability]] = {
     ),
     # The reviewer inspects and validates. Read plus tests, no write.
     AgentRole.REVIEWER: frozenset(
-        {Capability.FILESYSTEM_READ, Capability.TESTS_RUN, Capability.BROWSER_LOCAL}
+        {
+            Capability.FILESYSTEM_READ,
+            Capability.TESTS_RUN,
+            Capability.BROWSER_LOCAL,
+            Capability.PROJECT_EXECUTE,
+        }
     ),
     AgentRole.WEB: frozenset({Capability.WEB_ACCESS}),
 }

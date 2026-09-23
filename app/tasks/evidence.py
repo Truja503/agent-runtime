@@ -30,6 +30,7 @@ class AcceptanceCriteria(BaseModel):
     required_tool_calls: list[str] = Field(default_factory=list, max_length=100)
     required_tests: list[str] = Field(default_factory=list, max_length=100)
     required_visual_qa: bool = False
+    required_project_toolchain: bool = False
 
     @field_validator(
         "required_files",
@@ -195,6 +196,11 @@ def evaluate_acceptance(
     visual_qa: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     failures = evaluate_criteria(criteria, evidence)
+    if criteria.required_project_toolchain:
+        toolchain = (visual_qa or {}).get("toolchain", {})
+        for operation in ("build", "test"):
+            if not (toolchain.get(operation, {}).get("output") or {}).get("passed"):
+                failures.append(f"missing passing project {operation}")
     if criteria.required_visual_qa:
         if not visual_qa or not visual_qa.get("screenshots_generated"):
             failures.append("missing final visual QA screenshots")
@@ -202,8 +208,14 @@ def evaluate_acceptance(
             previews = visual_qa.get("previews", [])
             if {p.get("device") for p in previews} != {"desktop", "mobile"}:
                 failures.append("missing desktop/mobile visual QA")
+            for route in visual_qa.get("routes", ["/"]):
+                pairs = [p for p in previews if p.get("route", "/") == route]
+                if {p.get("device") for p in pairs} != {"desktop", "mobile"}:
+                    failures.append(f"missing desktop/mobile route QA: {route}")
             if any(
                 not p.get("dom_loaded")
+                or p.get("render_success") is False
+                or (p.get("http_status") is not None and p["http_status"] >= 400)
                 or p.get("console_errors")
                 or p.get("failed_resources")
                 or p.get("horizontal_overflow")

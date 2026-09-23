@@ -82,7 +82,7 @@ export interface Task {
   result: Record<string, unknown> | null;
   error: string | null;
   options: { project: string; workspace: string; agent: string; visual_project?: string | null;
-    long_run_quality?: boolean; worker_steps_mode?: string; max_repair_cycles?: number | null };
+    long_run_quality?: boolean; worker_steps_mode?: string; max_repair_cycles?: number | null; project_framework?: string };
 }
 export interface Workflow {
   cycle_number: number; cycle_limit: number | null; stage: string;

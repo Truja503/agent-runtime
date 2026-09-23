@@ -22,10 +22,11 @@ try:
     from playwright.async_api import Route, async_playwright
 except ImportError:  # Operator setup can be incomplete; keep the console available.
     async_playwright = None  # type: ignore[assignment]
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.errors import ToolExecutionError
 from app.tools.filesystem import Workspace
+from app.tools.project_manifest import ProjectArgs, read_manifest, route_path
 
 VIEWPORTS = {"desktop": {"width": 1440, "height": 1000}, "mobile": {"width": 390, "height": 844}}
 STATIC_EXTENSIONS = {
@@ -58,6 +59,12 @@ class BrowserArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project: str = Field(min_length=1, max_length=1024)
     viewport: Literal["desktop", "mobile", "both"] = "both"
+    routes: list[str] | None = Field(default=None, min_length=1, max_length=20)
+
+    @field_validator("routes")
+    @classmethod
+    def validate_routes(cls, routes: list[str] | None) -> list[str] | None:
+        return list(dict.fromkeys(route_path(p) for p in routes)) if routes else routes
 
 
 def served_file(project: Path, request_path: str, prefix: str) -> Path | None:
@@ -164,10 +171,12 @@ class Observations:
         self.url = url
         self.errors: list[str] = []
         self.failed: list[dict[str, Any]] = []
+        self.requests = 0
 
     async def guard(self, route: Route) -> None:
         request = route.request
-        if allowed_request(request.url, request.method, self.url):
+        self.requests += 1
+        if self.requests <= 300 and allowed_request(request.url, request.method, self.url):
             await route.continue_()
         else:
             if len(self.failed) < 50:
@@ -194,7 +203,9 @@ class Observations:
 
 
 class BrowserTools:
-    def __init__(self, workspace: Workspace):
+    def __init__(self, workspace: Workspace, projects: Any = None):
+        self.projects = projects
+        self._origin: str | None = None
         self.workspace = workspace
         self.lock = asyncio.Lock()
 
@@ -250,15 +261,25 @@ class BrowserTools:
     async def capture(self, args: BaseModel) -> dict[str, Any]:
         assert isinstance(args, BrowserArgs)
         project = self.workspace.resolve(args.project)
-        if not project.is_dir() or not (project / "index.html").is_file():
-            raise ToolExecutionError("browser project must contain index.html inside the workspace")
-        # Resolve both source entry and output paths before launching any process.
-        if served_file(project, "/index.html", "/") is None:
-            raise ToolExecutionError("project entry is not a confined static file")
+        flask = (project / "project.json").is_file()
+        if flask:
+            _, manifest = read_manifest(self.workspace, args.project)
+            if not self.projects:
+                raise ToolExecutionError("Flask project toolchain is not configured")
+            args = args.model_copy(update={"routes": args.routes or manifest.routes})
+        elif not project.is_dir() or served_file(project, "/index.html", "/") is None:
+            raise ToolExecutionError(
+                "browser project must contain confined index.html or project.json"
+            )
         for name in ("desktop.png", "mobile.png", "report.json"):
             self.artifact(project, name)
         async with self.lock:
             try:
+                if flask:
+                    serving = await self.projects.operation(
+                        "serve", ProjectArgs(project=args.project)
+                    )
+                    self._origin = serving["url"]
                 return await self._isolated_capture(project, args)
             except asyncio.CancelledError:
                 raise
@@ -267,6 +288,18 @@ class BrowserTools:
                     f"local browser QA failed: {type(exc).__name__}: {exc}; "
                     "no visual success recorded"
                 ) from exc
+            finally:
+                self._origin = None
+                if flask:
+                    await self.projects.operation("stop", ProjectArgs(project=args.project))
+
+    @asynccontextmanager
+    async def serving(self, project: Path) -> AsyncIterator[str]:
+        if self._origin:
+            yield self._origin
+        else:
+            async with local_server(project) as url:
+                yield url
 
     async def _isolated_capture(self, project: Path, args: BrowserArgs | None) -> dict[str, Any]:
         """Own the subprocess loop; Windows ASGI Selector loops cannot launch Playwright.
@@ -289,7 +322,9 @@ class BrowserTools:
 
             watcher = asyncio.create_task(watch())
             try:
-                async with asyncio.timeout(45):
+                async with asyncio.timeout(
+                    180 if args and args.routes and len(args.routes) > 1 else 45
+                ):
                     return await capture
             finally:
                 watcher.cancel()
@@ -339,7 +374,7 @@ class BrowserTools:
                 "setup": "Operator only: python -m playwright install chromium",
             }
         assert async_playwright is not None
-        async with local_server(project) as url, async_playwright() as playwright:
+        async with self.serving(project) as url, async_playwright() as playwright:
             browser = await playwright.chromium.launch(
                 headless=True,
                 channel="chromium",
@@ -351,7 +386,13 @@ class BrowserTools:
                 ],
             )
             try:
-                for name, viewport in VIEWPORTS.items():
+                routes = args.routes or ["/"]
+                captures = [
+                    (index, route, name, viewport)
+                    for index, route in enumerate(routes)
+                    for name, viewport in VIEWPORTS.items()
+                ]
+                for route_index, route, name, viewport in captures:
                     if args.viewport != "both" and args.viewport != name:
                         continue
                     context = await browser.new_context(
@@ -380,8 +421,13 @@ class BrowserTools:
                     page.on("requestfailed", observed.request_failed)
                     page.on("response", observed.response)
                     loaded = False
+                    http_status = None
+                    page_url = url.rstrip("/") + route
                     try:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=10000)
+                        response = await page.goto(
+                            page_url, wait_until="domcontentloaded", timeout=10000
+                        )
+                        http_status = response.status if response else None
                         loaded = True
                         await page.wait_for_timeout(500)
                     except Exception as exc:
@@ -396,14 +442,22 @@ class BrowserTools:
                     data = await page.screenshot(
                         type="png", full_page=False, animations="disabled", timeout=8000
                     )
-                    relative = self.workspace.relative(project) + f"/qa/{name}.png"
-                    target = self.artifact(project, name + ".png")
+                    filename = (
+                        f"{name}.png" if route == "/" else f"route-{route_index:02d}-{name}.png"
+                    )
+                    relative = self.workspace.relative(project) + "/qa/" + filename
+                    target = self.artifact(project, filename)
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    self.artifact(project, name + ".png").write_bytes(data)
+                    self.artifact(project, filename).write_bytes(data)
                     images.append(base64.b64encode(data).decode())
                     previews.append(
                         {
-                            "url": url,
+                            "url": page_url,
+                            "route": route,
+                            "http_status": http_status,
+                            "render_success": loaded
+                            and http_status is not None
+                            and http_status < 400,
                             "viewport": viewport,
                             "device": name,
                             "title": await page.title(),
@@ -431,6 +485,7 @@ class BrowserTools:
             "horizontal_overflow": {p["device"]: p["horizontal_overflow"] for p in previews},
             "scroll_height": {p["device"]: p["document_dimensions"]["height"] for p in previews},
             "viewport": {p["device"]: p["viewport"] for p in previews},
+            "routes": args.routes or ["/"],
             "previews": previews,
             "screenshots_generated": bool(previews),
             "screenshots": [p["screenshot"] for p in previews],

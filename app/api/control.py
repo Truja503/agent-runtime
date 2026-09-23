@@ -7,25 +7,75 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict
 
 from app.agents.base import SECURITY_PREAMBLE
 from app.api.auth import ApiCaller, current_caller, require_operator
 from app.api.deps import get_runtime
+from app.api.privileged import OperatorCredentials, _authenticate, operator_credentials
 from app.container import Runtime
-from app.errors import ModelError, RuntimeConfigError, TaskNotFoundError
+from app.errors import ModelError, RuntimeConfigError, TaskNotFoundError, ToolExecutionError
 from app.models.base import Message, ModelRequest, Role
 from app.models.discovery import discover
 from app.models.profiles import ModelConfiguration, ModelPool, configuration_path
 from app.observability.events import EventType
 from app.tasks.evidence import execution_evidence
+from app.tools.project_manifest import ProjectArgs
 from app.tools.web import WebRequest
 
 router = APIRouter(tags=["control"], dependencies=[Depends(current_caller)])
 
 
+class DependencyDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    approve: bool
+    allow_additional_packages: bool = False
+
+
+@router.post("/project-toolchain/inspect")
+async def project_inspect(body: ProjectArgs, rt: Runtime = Depends(get_runtime)) -> dict[str, Any]:
+    try:
+        return await rt.projects.inspect(body)
+    except ToolExecutionError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+@router.get("/project-toolchain/approvals")
+async def dependency_requests(rt: Runtime = Depends(get_runtime)) -> list[dict[str, Any]]:
+    return rt.inspection.privacy.clean(rt.projects.requests())
+
+
+@router.post("/project-toolchain/approvals/{request_id}")
+async def dependency_decide(
+    request_id: str,
+    body: DependencyDecision,
+    rt: Runtime = Depends(get_runtime),
+    credentials: OperatorCredentials = Depends(operator_credentials),
+) -> dict[str, Any]:
+    _authenticate(rt, credentials)
+    try:
+        result = await rt.projects.decide(
+            request_id, credentials.operator_id, body.approve, body.allow_additional_packages
+        )
+        await rt.events.emit(
+            EventType.PRIVILEGED_ACTION_APPROVED
+            if body.approve
+            else EventType.PRIVILEGED_ACTION_DENIED,
+            actor=credentials.operator_id,
+            request_id=request_id,
+            task_id=result.get("task_id"),
+            action="project.dependencies",
+            status=result["status"],
+        )
+        return rt.inspection.privacy.clean(result)
+    except ToolExecutionError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
 @router.post("/browser/readiness")
 async def browser_readiness(
-    rt: Runtime = Depends(get_runtime), _: ApiCaller = Depends(require_operator),
+    rt: Runtime = Depends(get_runtime),
+    _: ApiCaller = Depends(require_operator),
 ) -> dict[str, Any]:
     return await rt.browser_readiness()
 

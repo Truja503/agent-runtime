@@ -11,7 +11,7 @@ from typing import Any
 from app.agents.base import AgentResult, AgentStatus, BaseAgent
 from app.observability.events import EventBus, EventType
 from app.tasks.evidence import AcceptanceCriteria, evaluate_acceptance, execution_evidence, file_key
-from app.tools.broker import ToolBroker, ToolInvocation
+from app.tools.broker import InvocationStatus, ToolBroker, ToolInvocation, ToolResult
 
 
 async def run_visual_workflow(
@@ -29,6 +29,7 @@ async def run_visual_workflow(
     long_run: bool = False,
     checkpoint: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     restored: dict[str, Any] | None = None,
+    toolchain: bool = False,
 ) -> dict[str, Any]:
     state = dict(restored or {})
     real_repairs = int(state.get("real_repair_cycles", 0))
@@ -134,6 +135,8 @@ async def run_visual_workflow(
             coder.allowed_tools = coder.allowed_tools - {
                 "filesystem.write",
                 "system.request_privileged_action",
+                "project.dependencies",
+                "project.build",
             }
             instruction = (
                 "Operator resumed. Inspect current files read-only. Do not replay actions."
@@ -212,20 +215,55 @@ async def run_visual_workflow(
                 break
             continue
         no_progress = 0
+        toolchain_results: dict[str, Any] = {}
+        toolchain_failed = False
+        infrastructure_failed = False
+        if toolchain:
+            for operation in ("dependencies", "build", "test"):
+                await save("project_" + operation)
+                result = await broker.invoke(
+                    workers["coder"].principal(task_id),
+                    ToolInvocation(tool="project." + operation, arguments={"project": project}),
+                )
+                if result.status == InvocationStatus.APPROVAL_REQUIRED and coder.approval_waiter:
+                    result = await coder.approval_waiter(task_id, result)
+                toolchain_results[operation] = result.model_dump(mode="json")
+                if result.status != InvocationStatus.COMPLETED:
+                    toolchain_failed = True
+                    infrastructure_failed = result.output is None and (
+                        operation == "dependencies" or "docker" in (result.reason or "").lower()
+                    )
+                    break
         qa = None  # Never certify a previous snapshot after new writes.
         await save("visual_qa")
         await worker_start("reviewer")
-        capture = await broker.invoke(
-            reviewer.principal(task_id),
-            ToolInvocation(
+        capture = (
+            ToolResult(
+                status=InvocationStatus.FAILED,
                 tool="browser.screenshot",
-                arguments={"project": project, "viewport": "both"},
-            ),
+                reason="Project build/test/dependencies failed; see toolchain results",
+                output={"screenshots_generated": False},
+            )
+            if toolchain_failed
+            else await broker.invoke(
+                reviewer.principal(task_id),
+                ToolInvocation(
+                    tool="browser.screenshot",
+                    arguments={"project": project, "viewport": "both"},
+                ),
+            )
         )
+        if toolchain:
+            capture.output = {**(capture.output or {}), "toolchain": toolchain_results}
+            if capture.status == InvocationStatus.FAILED and "Flask startup failed" in (
+                capture.reason or ""
+            ):
+                toolchain_failed = True
+                toolchain_results["serve"] = {"status": "failed", "reason": capture.reason}
         qa, images = capture.output, capture.images
         rendered = bool(capture.status == "completed" and qa and qa.get("screenshots_generated"))
         attempt.update(visual_qa=capture.model_dump(mode="json"), browser_QA_performed=rendered)
-        if is_repair and modified and rendered and not polish:
+        if is_repair and modified and (rendered or toolchain_failed) and not polish:
             real_repairs += 1
             attempt["status"] = "REPAIR_PERFORMED"
         elif polish and rendered:
@@ -308,7 +346,7 @@ async def run_visual_workflow(
         if polish:
             polish_done, polish = True, False
         resume_validation = False
-        if not rendered:
+        if not rendered and (not toolchain_failed or infrastructure_failed):
             # Infrastructure needs operator attention, not fictitious code repair attempts.
             qa = {**(qa or {}), "error": capture.reason}
             stop_reason, workflow_status = "browser_infrastructure_failure", "failed"
@@ -322,7 +360,7 @@ async def run_visual_workflow(
                 polish = True
             else:
                 stop_reason, workflow_status = "verified_completion", "completed"
-        elif not long_run and max_repairs is not None and not critical:
+        elif not long_run and max_repairs is not None and not critical and not toolchain_failed:
             stop_reason, workflow_status = "no_actionable_findings", "failed"
         await record(attempt)
         if workflow_status != "running":

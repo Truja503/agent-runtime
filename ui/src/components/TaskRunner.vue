@@ -15,6 +15,7 @@ const requiredFiles = ref(""),
   requireReadback = ref(false),
   requireReview = ref(false);
 const visualProject = ref(""), repairCycles = ref(2);
+const framework = ref("static");
 const stepsMode = ref("profile"), repairMode = ref("default"), longRun = ref(false);
 const paths = () =>
   requiredFiles.value
@@ -26,6 +27,7 @@ function run() {
     goal: goal.value,
     agent: visualProject.value.trim() ? "auto" : agent.value,
     visual_project: visualProject.value.trim() || null,
+    project_framework: framework.value,
     max_repair_cycles: repairMode.value === "unlimited" ? null : repairMode.value === "default" ? 2 : repairCycles.value,
     worker_steps_mode: stepsMode.value,
     long_run_quality: longRun.value,
@@ -86,6 +88,11 @@ function run() {
           <input v-model="visualProject" placeholder="my-site" />
         </label>
         <label><input type="checkbox" v-model="longRun" /> Long-Run Quality Mode</label>
+        <label v-if="visualProject.trim()">Project framework
+          <select v-model="framework" aria-label="Project framework">
+            <option value="static">Static HTML</option><option value="flask">Flask + Jinja (optional Vite)</option>
+          </select>
+        </label>
         <p v-if="longRun" class="muted">Quality before speed. Fresh repair invocations, verified acceptance and one final polish pass. Unlimited is opt-in below; cancellation remains available.</p>
         <label v-if="visualProject.trim()">Visual refinement
           <select v-model="repairMode" aria-label="Visual refinement">

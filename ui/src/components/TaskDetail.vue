@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { api, pretty, terminal, taskTitle } from "../api";
 import type { Acceptance, Review, Evidence, Event, Task, Workflow } from "../types";
+import ProjectToolchain from "./ProjectToolchain.vue";
 const props = defineProps<{
   task: Task;
   events: Event[];
@@ -111,6 +112,7 @@ async function loadPrompts() {
       }}</span>
     </div>
     <details><summary>Task instructions</summary><pre>{{ task.goal }}</pre></details>
+    <ProjectToolchain v-if="task.options.project_framework === 'flask'" :project="task.options.visual_project" :editable="editable" :checkpoint="task.status + ':' + workflow?.stage" />
     <div v-if="workflow" class="notice">
       <strong v-if="task.options.long_run_quality">LONG-RUN · </strong>
       <strong v-if="workflow.cycle_number !== undefined">Cycle {{ workflow.cycle_number }} / {{ workflow.cycle_limit === null ? '∞' : workflow.cycle_limit }}</strong>

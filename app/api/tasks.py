@@ -103,7 +103,7 @@ async def resume_task(
         if task.status not in {TaskStatus.PAUSED, TaskStatus.STALLED} or task_id in runtime._jobs:
             raise HTTPException(409, "task is not paused/stalled")
         for request_id in (task.result or {}).get("pending_approvals", []):
-            ticket = await runtime.privileged_gateway.status(request_id)
+            ticket = await runtime.approval_status(request_id)
             if ticket and ticket.status == "awaiting_approval":
                 raise HTTPException(409, "operator approval remains pending")
         await runtime.tasks.record_result(

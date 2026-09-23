@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -17,6 +18,8 @@ from app.tools.filesystem import (
 )
 from app.tools.github import GitHubTools, ReadRepoArgs
 from app.tools.privileged_tool import RequestPrivilegedActionArgs, refuse
+from app.tools.project import ProjectToolchain
+from app.tools.project_manifest import ProjectArgs
 from app.tools.registry import ToolRegistry
 from app.tools.testing import CommandRunner, ProjectTestTools, RunTestsArgs
 
@@ -29,6 +32,7 @@ def build_registry(
     github_client: httpx.AsyncClient | None = None,
     project_root: Path | None = None,
     include_privileged: bool = True,
+    projects: ProjectToolchain | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     filesystem = FilesystemTools(workspace)
@@ -38,7 +42,7 @@ def build_registry(
         suites=test_suites,
     )
     github = GitHubTools(github_client)
-    browser = BrowserTools(workspace)
+    browser = BrowserTools(workspace, projects)
     for name in ("browser.preview", "browser.screenshot", "browser.console_errors"):
         registry.register(
             name=name,
@@ -116,3 +120,29 @@ def build_registry(
         )
 
     return registry
+
+
+def register_project_tools(registry: ToolRegistry, projects: ProjectToolchain) -> None:
+    for operation in ("inspect", "dependencies", "build", "serve", "stop", "test"):
+        handler = (
+            projects.inspect
+            if operation == "inspect"
+            else projects.dependencies
+            if operation == "dependencies"
+            else partial(projects.operation, operation)
+        )
+        registry.register(
+            name="project." + operation,
+            description=(
+                f"Controlled Flask/Vite {operation}; project.json only, no commands. "
+                "Dependencies require operator approval."
+            ),
+            risk=RiskLevel.MEDIUM,
+            required_permissions={
+                Capability.PROJECT_DEPENDENCIES
+                if operation == "dependencies"
+                else Capability.PROJECT_EXECUTE
+            },
+            args_model=ProjectArgs,
+            handler=handler,
+        )
