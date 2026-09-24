@@ -118,11 +118,31 @@ async def test_reviewer_cannot_install_dependencies(runtime: Runtime) -> None:
     assert runtime.projects.requests() == []
 
 
-async def test_project_scope_prevents_runtime_and_environment_writes(runtime: Runtime) -> None:
+async def test_project_scope_is_project_rooted_and_still_confined(runtime: Runtime) -> None:
     runtime.broker.project_scopes["task"] = "site"
+
+    listed = await runtime.broker.invoke(
+        runtime.workers["coder"].principal("task"),
+        ToolInvocation(tool="filesystem.list", arguments={"path": "."}),
+    )
+    assert listed.status == "completed"
+    assert listed.output and listed.output["path"] == "site"
+
+    written = await runtime.broker.invoke(
+        runtime.workers["coder"].principal("task"),
+        ToolInvocation(
+            tool="filesystem.write",
+            arguments={"path": "app/main.py", "content": "safe"},
+        ),
+    )
+    assert written.status == "completed"
+    assert (runtime.settings.workspace_root / "site/app/main.py").read_text() == "safe"
+    assert not (runtime.settings.workspace_root / "app/main.py").exists()
+
     for path in (
-        "app/main.py",
+        "../app/main.py",
         "site/../app/main.py",
+        "/tmp/main.py",
         "site/.venv/bin/python",
         "site/node_modules/vite/bin/vite.js",
     ):
@@ -131,6 +151,7 @@ async def test_project_scope_prevents_runtime_and_environment_writes(runtime: Ru
             ToolInvocation(tool="filesystem.write", arguments={"path": path, "content": "bad"}),
         )
         assert result.status == "denied"
+
     result = await runtime.broker.invoke(
         runtime.workers["coder"].principal("task"),
         ToolInvocation(tool="tests.run", arguments={"suite": "default"}),
