@@ -119,6 +119,7 @@ async def test_reviewer_cannot_install_dependencies(runtime: Runtime) -> None:
 
 
 async def test_project_scope_is_project_rooted_and_still_confined(runtime: Runtime) -> None:
+    (runtime.settings.workspace_root / "site").mkdir()
     runtime.broker.project_scopes["task"] = "site"
 
     listed = await runtime.broker.invoke(
