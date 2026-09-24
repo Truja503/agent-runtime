@@ -103,10 +103,17 @@ class SupervisorAgent(BaseAgent):
         if not selected:
             # A model that returns nothing usable must not stall the runtime.
             selected = [name for name in ("researcher", "reviewer") if name in self._workers]
-        if research_required or web_research_required or plan.web_requests:
+        if research_required or web_research_required:
             selected = list(dict.fromkeys(["researcher", *selected]))
         if implementation:
+            # The implementation callback owns coder/reviewer execution. Optional
+            # supervisor-planned Web requests are already executed above and passed
+            # into that callback, so they must not implicitly turn Researcher into
+            # a blocking preflight worker. Researcher is a gate only when the
+            # operator explicitly requires research.
             selected = [name for name in selected if name not in {"coder", "reviewer"}]
+            if not (research_required or web_research_required):
+                selected = [name for name in selected if name != "researcher"]
         selected.sort(key=lambda name: ("researcher", "coder", "reviewer").index(name))
 
         results: list[AgentResult] = []
