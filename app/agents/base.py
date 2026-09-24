@@ -309,6 +309,7 @@ class WorkerAgent(BaseAgent):
 
         seen_actions: set[str] = set()
         stagnant = 0
+        stall_recoveries = 0
         for step in count(1):
             if self.max_steps is not None and step > self.max_steps:
                 break
@@ -348,6 +349,21 @@ class WorkerAgent(BaseAgent):
                     if len(messages) > 13:
                         messages = [messages[0], *messages[-12:]]
                     if stagnant >= 3:
+                        if stall_recoveries == 0:
+                            stall_recoveries += 1
+                            stagnant = 0
+                            messages.append(
+                                Message(
+                                    role=Role.USER,
+                                    content=(
+                                        "Recovery checkpoint: repeated invalid decisions are not "
+                                        "progress. Re-read the tool catalogue, choose one different "
+                                        "valid action, or finish honestly with the blocker. Do not "
+                                        "repeat the same response."
+                                    ),
+                                )
+                            )
+                            continue
                         status, summary = AgentStatus.STALLED, "repeated invalid model decisions"
                         break
                 continue
@@ -378,6 +394,20 @@ class WorkerAgent(BaseAgent):
                 if self.max_steps is None:
                     stagnant += 1
                     if stagnant >= 3:
+                        if stall_recoveries == 0:
+                            stall_recoveries += 1
+                            stagnant = 0
+                            messages.append(
+                                Message(
+                                    role=Role.USER,
+                                    content=(
+                                        "Recovery checkpoint: your tool decision is incomplete. "
+                                        "Choose one declared tool with valid arguments, or finish "
+                                        "honestly with the blocker."
+                                    ),
+                                )
+                            )
+                            continue
                         status, summary = AgentStatus.STALLED, "repeated missing tool decisions"
                         break
                 continue
@@ -409,9 +439,25 @@ class WorkerAgent(BaseAgent):
                 if len(seen_actions) > 256:
                     seen_actions = {fingerprint}
                 if stagnant >= 3:
+                    if stall_recoveries == 0:
+                        stall_recoveries += 1
+                        stagnant = 0
+                        seen_actions.clear()
+                        messages.append(
+                            Message(
+                                role=Role.USER,
+                                content=(
+                                    "Recovery checkpoint: you are repeating the same tool action "
+                                    "without progress. Do NOT repeat it unchanged. Use the latest "
+                                    "error/result to choose a different allowed action, correct the "
+                                    "arguments/state, or finish honestly with a blocker."
+                                ),
+                            )
+                        )
+                        continue
                     status, summary = (
                         AgentStatus.STALLED,
-                        "repeated tool execution without progress",
+                        "repeated tool execution without progress after recovery guidance",
                     )
                     break
             # File pages are bounded by the handler. Never silently cut their content
@@ -453,6 +499,18 @@ class WorkerAgent(BaseAgent):
                     images=attached,
                 )
             )
+            if result.status in {InvocationStatus.DENIED, InvocationStatus.FAILED}:
+                messages.append(
+                    Message(
+                        role=Role.USER,
+                        content=(
+                            "Recovery guidance: this denied/failed tool call is not automatically "
+                            "terminal. Do not repeat the same request unchanged. Inspect the error, "
+                            "use a different declared tool or corrected arguments, and continue "
+                            "toward the task. Finish only if the blocker is genuinely unavoidable."
+                        ),
+                    )
+                )
             if self.max_steps is None:
                 if len(messages) > 13:
                     messages = [messages[0], *messages[-12:]]
