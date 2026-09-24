@@ -109,9 +109,14 @@ def read_manifest(workspace: Workspace, project: str) -> tuple[Path, ProjectMani
             json.loads(raw, object_pairs_hook=_unique_object)
         )
     except ValidationError as exc:
+        errors = exc.errors(
+            include_url=False,
+            include_context=False,
+            include_input=False,
+        )[:8]
         details = "; ".join(
             f"{'.'.join(str(part) for part in error['loc']) or 'project.json'}: {error['msg']}"
-            for error in exc.errors(include_url=False, include_context=False, include_input=False)[:8]
+            for error in errors
         )
         raise ToolExecutionError(f"invalid project manifest: {details}") from None
     except (ValueError, OSError) as exc:
