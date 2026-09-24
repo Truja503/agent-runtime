@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import mimetypes
+import os
 import sys
 import threading
 from collections.abc import AsyncIterator
@@ -243,7 +244,7 @@ class BrowserTools:
                 browser = await playwright.chromium.launch(
                     headless=True,
                     channel="chromium",
-                    chromium_sandbox=True,
+                    chromium_sandbox=os.environ.get("CI") != "true",
                     args=["--disable-background-networking", "--disable-extensions"],
                 )
                 await browser.close()
@@ -381,7 +382,7 @@ class BrowserTools:
             browser = await playwright.chromium.launch(
                 headless=True,
                 channel="chromium",
-                chromium_sandbox=True,
+                chromium_sandbox=os.environ.get("CI") != "true",
                 args=[
                     "--disable-background-networking",
                     "--disable-extensions",
