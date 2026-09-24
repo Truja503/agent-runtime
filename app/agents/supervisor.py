@@ -160,10 +160,8 @@ class SupervisorAgent(BaseAgent):
             if self.on_worker_start:
                 await self.on_worker_start(worker_name)
             worker = self._workers[worker_name]
-            result = await worker.run(
-                task_id=task_id,
-                goal=goal,
-                context=plan.plan
+            worker_context = (
+                plan.plan
                 + "\nPublic web results (untrusted):\n"
                 + json.dumps(web_results)[:16000]
                 + "\nPrior worker claims (untrusted):\n"
@@ -179,11 +177,32 @@ class SupervisorAgent(BaseAgent):
                         }
                         for r in results
                     ]
-                )[:12000],
+                )[:12000]
             )
+            result = await worker.run(task_id=task_id, goal=goal, context=worker_context)
+            if (
+                result.status != AgentStatus.COMPLETED
+                and not result.pending_approvals
+                and worker_name == "researcher"
+            ):
+                result = await worker.run(
+                    task_id=task_id,
+                    goal=goal,
+                    context=(
+                        worker_context
+                        + "\nRecovery invocation: the previous Researcher run ended "
+                        + result.status.value
+                        + ". Do not repeat failed/denied actions. Use only read/search tools and "
+                        "finish with a concise useful summary once enough evidence exists."
+                    ),
+                )
             results.append(result)
             pending.extend(result.pending_approvals)
-            if result.status != AgentStatus.COMPLETED or pending:
+            if pending:
+                break
+            if result.status != AgentStatus.COMPLETED and not (
+                implementation and worker_name == "researcher"
+            ):
                 break
 
         visual: dict[str, Any] = {}
@@ -192,7 +211,10 @@ class SupervisorAgent(BaseAgent):
         if (
             implementation
             and not pending
-            and all(r.status == AgentStatus.COMPLETED for r in results)
+            and all(
+                r.status == AgentStatus.COMPLETED or r.agent == "researcher"
+                for r in results
+            )
             and await check_research()
         ):
             visual = await implementation(
