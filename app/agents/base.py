@@ -357,7 +357,7 @@ class WorkerAgent(BaseAgent):
                                     role=Role.USER,
                                     content=(
                                         "Recovery checkpoint: repeated invalid decisions are not "
-                                        "progress. Re-read the tool catalogue, choose one different "
+                                        "progress. Re-read the tool catalogue and choose a different "
                                         "valid action, or finish honestly with the blocker. Do not "
                                         "repeat the same response."
                                     ),
@@ -449,8 +449,8 @@ class WorkerAgent(BaseAgent):
                                 content=(
                                     "Recovery checkpoint: you are repeating the same tool action "
                                     "without progress. Do NOT repeat it unchanged. Use the latest "
-                                    "error/result to choose a different allowed action, correct the "
-                                    "arguments/state, or finish honestly with a blocker."
+                                    "error/result to choose a different allowed action, correct "
+                                    "the arguments/state, or finish honestly with a blocker."
                                 ),
                             )
                         )
@@ -505,8 +505,8 @@ class WorkerAgent(BaseAgent):
                         role=Role.USER,
                         content=(
                             "Recovery guidance: this denied/failed tool call is not automatically "
-                            "terminal. Do not repeat the same request unchanged. Inspect the error, "
-                            "use a different declared tool or corrected arguments, and continue "
+                            "terminal. Do not repeat the same request unchanged. Inspect the "
+                            "error, use a different declared tool or corrected arguments, and continue "
                             "toward the task. Finish only if the blocker is genuinely unavoidable."
                         ),
                     )
