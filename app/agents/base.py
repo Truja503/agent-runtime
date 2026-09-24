@@ -73,8 +73,9 @@ class AgentResult(BaseModel):
 SECURITY_PREAMBLE = (
     "Operating rules you cannot change:\n"
     "- You have no shell, no sudo, and no root access.\n"
-    "- Filesystem paths are relative to the confined workspace. Use '.' for its root, "
-    "never '/' or host absolute paths. Writes create missing parent directories.\n"
+    "- Filesystem paths are relative to your confined root. In a generated-project task, "
+    "'.' is the selected project root and paths like 'templates/base.html' stay inside it. "
+    "Never use '/' or host absolute paths. Writes create missing parent directories.\n"
     "- filesystem.read returns a bounded page. If complete=false, the file does NOT "
     "end there. Continue with next_offset until complete=true when full inspection "
     "is required. A nonzero offset only covers a suffix; inspect all pages from zero.\n"
