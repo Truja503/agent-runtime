@@ -332,9 +332,12 @@ class BrowserTools:
 
         def worker() -> None:
             try:
-                factory = (
-                    asyncio.ProactorEventLoop if sys.platform == "win32" else asyncio.new_event_loop
-                )
+                factory = asyncio.new_event_loop
+                if sys.platform == "win32":
+                    # ProactorEventLoop is Windows-only and therefore absent from
+                    # asyncio's type surface on Linux CI. Runtime lookup preserves
+                    # the Windows subprocess behavior without a platform-stub error.
+                    factory = getattr(asyncio, "ProactorEventLoop")
                 with asyncio.Runner(loop_factory=factory) as runner:
                     result = runner.run(run())
                 completed.set_result(result)
