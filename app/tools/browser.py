@@ -337,7 +337,7 @@ class BrowserTools:
                     # ProactorEventLoop is Windows-only and therefore absent from
                     # asyncio's type surface on Linux CI. Runtime lookup preserves
                     # the Windows subprocess behavior without a platform-stub error.
-                    factory = getattr(asyncio, "ProactorEventLoop")
+                    factory = getattr(asyncio, "ProactorEventLoop")  # noqa: B009
                 with asyncio.Runner(loop_factory=factory) as runner:
                     result = runner.run(run())
                 completed.set_result(result)
