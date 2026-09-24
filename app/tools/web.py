@@ -11,17 +11,16 @@ import re
 import socket
 import ssl
 import time
-from pathlib import Path
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.errors import ToolExecutionError
