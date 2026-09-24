@@ -74,6 +74,22 @@ async def test_unlimited_worker_exceeds_fifty_with_bounded_context(runtime: Runt
     assert all(sum("Task: Work" in m.content for m in r.messages) == 1 for r in model.requests)
 
 
+async def test_unlimited_worker_gets_recovery_chance_before_stalling(runtime: Runtime) -> None:
+    repeated = tool("filesystem.read", "README.md")
+    runtime.workers["coder"].model = ScriptedModelProvider(
+        script={"coder": [repeated, repeated, repeated, repeated, finish()]}
+    )
+    task = await runtime.tasks.create(
+        "Recover from a repeated read",
+        created_by="test",
+        options=TaskOptions(agent="coder", max_steps=0),
+    )
+    await runtime.run_task(task.id)
+    result = await runtime.tasks.get(task.id)
+    assert result.status == TaskStatus.COMPLETED
+    assert result.result and result.result["worker_results"][0]["steps"] == 5
+
+
 @pytest.mark.parametrize(
     "decision", ["invalid", '{"action":"use_tool"}', tool("filesystem.read", "README.md")]
 )
