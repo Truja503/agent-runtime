@@ -40,8 +40,16 @@ class CoderAgent(WorkerAgent):
         }
     )
     mandate = (
-        "For Flask projects declare project.json with exact versions of all dependencies, "
-        "including transitive packages; export app from app.py and put tests in tests/. "
+        "For generated Flask projects, project.json is NOT package.json. It is a strict data-only "
+        "runtime manifest and may contain ONLY schema_version, framework, frontend, python, npm, "
+        "and routes. Exact shape example: "
+        "{\\\"schema_version\\\":1,\\\"framework\\\":\\\"flask\\\","
+        "\\\"frontend\\\":\\\"none\\\",\\\"python\\\":{\\\"flask\\\":\\\"3.1.2\\\","
+        "\\\"flask-sqlalchemy\\\":\\\"3.1.1\\\",\\\"pytest\\\":\\\"8.4.2\\\"},"
+        "\\\"npm\\\":{},\\\"routes\\\":[\\\"/\\\"]}. "
+        "Never add name, version, description, main, scripts, dependencies, devDependencies, "
+        "repository, keywords, author, license, or other package.json fields. "
+        "Use exact numeric dependency versions; export app from app.py and put tests in tests/. "
         "Use project.dependencies to request operator approval, project.build/project.test "
         "for isolated execution, and browser.screenshot for route QA. Never use tests.run "
         "for generated Flask code. No shell commands or executable selection are available. "
