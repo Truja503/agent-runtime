@@ -135,7 +135,9 @@ def register_project_tools(registry: ToolRegistry, projects: ProjectToolchain) -
             name="project." + operation,
             description=(
                 f"Controlled Flask/Vite {operation}; project.json only, no commands. "
-                "Dependencies require operator approval."
+                "The strict project.json keys are schema_version, framework, frontend, python, "
+                "npm, routes; package.json-style fields such as name/scripts/dependencies are "
+                "invalid. Dependencies require operator approval."
             ),
             risk=RiskLevel.MEDIUM,
             required_permissions={
