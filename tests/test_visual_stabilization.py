@@ -298,6 +298,50 @@ async def test_rejected_request_is_not_pending(runtime: Runtime) -> None:
     assert not await runtime.privileged_service.list_pending()
 
 
+async def test_optional_research_does_not_gate_visual_implementation(runtime: Runtime) -> None:
+    calls = mock_qa(runtime)
+    runtime.supervisor.model = ScriptedModelProvider(
+        script={
+            "supervisor": [
+                json.dumps(
+                    {
+                        "workers": ["researcher", "coder", "reviewer"],
+                        "plan": "Repair the existing generated project",
+                        "web_requests": [
+                            {"operation": "web.search", "query": "Flask project recovery"}
+                        ],
+                    }
+                )
+            ]
+        }
+    )
+    model = ScriptedModelProvider(
+        script={
+            "researcher": [tool("filesystem.write", "project.json", content="bad")],
+            "coder": [finish()],
+            "reviewer": [review("pass")],
+        }
+    )
+    for worker in runtime.workers.values():
+        worker.model = model
+
+    task = await runtime.tasks.create(
+        "Repair an existing visual Flask project without required research",
+        created_by="test",
+        options=TaskOptions(visual_project="site", project_framework="flask"),
+    )
+    await runtime.run_task(task.id)
+    result = await runtime.tasks.get(task.id)
+    starts = [
+        e.actor
+        for e in await runtime.tasks.events_for(task.id)
+        if e.type == EventType.AGENT_STARTED
+    ]
+    assert "researcher" not in starts
+    assert result.status == TaskStatus.COMPLETED
+    assert calls == ["qa"]
+
+
 async def test_research_web_coder_qa_reviewer_order(runtime: Runtime) -> None:
     calls = mock_qa(runtime)
     spec = runtime.registry.get("web.search")
