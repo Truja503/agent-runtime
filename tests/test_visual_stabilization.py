@@ -327,7 +327,11 @@ async def test_research_web_coder_qa_reviewer_order(runtime: Runtime) -> None:
     task = await runtime.tasks.create(
         "Research current official documentation using Web, then build",
         created_by="test",
-        options=TaskOptions(visual_project="site"),
+        options=TaskOptions(
+            visual_project="site",
+            research_required=True,
+            web_research_required=True,
+        ),
     )
     await runtime.run_task(task.id)
     result = await runtime.tasks.get(task.id)
@@ -368,7 +372,9 @@ async def test_research_only_task_cannot_claim_unexecuted_web_research(runtime: 
     )
     runtime.workers["researcher"].model = ScriptedModelProvider(script={"researcher": [finish()]})
     task = await runtime.tasks.create(
-        "Research current official Web documentation", created_by="test"
+        "Research current official Web documentation",
+        created_by="test",
+        options=TaskOptions(research_required=True, web_research_required=True),
     )
     await runtime.run_task(task.id)
     result = await runtime.tasks.get(task.id)
@@ -406,11 +412,18 @@ async def test_required_research_cannot_be_skipped(runtime: Runtime, degraded: b
     task = await runtime.tasks.create(
         "Research current official documentation using Web then build",
         created_by="test",
-        options=TaskOptions(visual_project="site", allow_degraded_research=degraded),
+        options=TaskOptions(
+            visual_project="site",
+            research_required=True,
+            web_research_required=True,
+            allow_degraded_research=degraded,
+        ),
     )
     await runtime.run_task(task.id)
     result = await runtime.tasks.get(task.id)
-    assert result.result and result.result["research_status"] == "web_research_unavailable"
+    assert result.result
+    expected_research = "degraded" if degraded else "web_research_unavailable"
+    assert result.result["research_status"] == expected_research
     assert bool(calls) is degraded
     assert result.status == (TaskStatus.COMPLETED if degraded else TaskStatus.FAILED)
     starts = [
