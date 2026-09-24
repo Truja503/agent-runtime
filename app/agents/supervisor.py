@@ -12,7 +12,6 @@ set of registered names. A model that answers "root" or "shell" selects nothing.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -92,15 +91,9 @@ class SupervisorAgent(BaseAgent):
         )
 
         plan = await self._plan(task_id=task_id, goal=goal)
-        research_required = research_required or bool(
-            re.search(r"\b(research|researcher|investigar|investigación)\b", goal, re.I)
-        )
-        web_research_required = web_research_required or (
-            research_required
-            and bool(
-                re.search(r"\b(web|github|internet|current|official documentation)\b", goal, re.I)
-            )
-        )
+        # Hard workflow requirements are operator-owned structured options.
+        # Natural-language task text is untrusted and must never silently turn
+        # optional research into a deterministic execution requirement.
         web_results = (
             [await self.web.execute(request, task_id) for request in plan.web_requests]
             if self.web
@@ -110,7 +103,7 @@ class SupervisorAgent(BaseAgent):
         if not selected:
             # A model that returns nothing usable must not stall the runtime.
             selected = [name for name in ("researcher", "reviewer") if name in self._workers]
-        if research_required or plan.web_requests:
+        if research_required or web_research_required or plan.web_requests:
             selected = list(dict.fromkeys(["researcher", *selected]))
         if implementation:
             selected = [name for name in selected if name not in {"coder", "reviewer"}]
@@ -123,25 +116,36 @@ class SupervisorAgent(BaseAgent):
 
         async def check_research() -> bool:
             nonlocal research_status
-            if not web_research_required and not plan.web_requests:
-                return True
             recorded = await self.events.list_for_task(task_id)
             completed = any(
                 e.actor == "web" and e.type == EventType.TOOL_COMPLETED for e in recorded
             )
+
+            # Supervisor-planned web requests are advisory unless the operator
+            # explicitly marked Web research as required. Optional Web failure
+            # remains visible in events/results but never blocks implementation.
+            if not web_research_required:
+                if plan.web_requests:
+                    research_status = "completed" if completed else "optional_web_unavailable"
+                return True
+
             research_status = "completed" if completed else "web_research_unavailable"
-            if not completed:
-                await self.events.emit(
-                    EventType.AGENT_FAILED,
-                    task_id=task_id,
-                    actor="web",
-                    reason=research_status,
-                    degraded_execution=allow_degraded_research,
-                )
-                if not allow_degraded_research:
-                    routing_failures.append(research_status)
-                    return False
-            return True
+            if completed:
+                return True
+
+            await self.events.emit(
+                EventType.AGENT_FAILED,
+                task_id=task_id,
+                actor="web",
+                reason=research_status,
+                degraded_execution=allow_degraded_research,
+            )
+            if allow_degraded_research:
+                research_status = "degraded"
+                return True
+
+            routing_failures.append("web_research_unavailable")
+            return False
 
         for worker_name in selected:
             if worker_name != "researcher" and not await check_research():

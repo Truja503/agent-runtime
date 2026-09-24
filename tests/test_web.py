@@ -464,3 +464,52 @@ async def test_supervisor_sends_structured_request_not_goal(runtime: Runtime) ->
     result = (await runtime.tasks.get(task.id)).result
     assert result["web_results"][0]["output"]["sources"] == ["https://example.com/docs"]
     assert any(e.type.value == "web_egress" for e in await runtime.tasks.events_for(task.id))
+
+
+async def test_prompt_words_do_not_create_hard_research_requirements(runtime: Runtime) -> None:
+    model = ScriptedModelProvider(
+        script={
+            "supervisor": [
+                json.dumps({"workers": ["researcher"], "plan": "inspect", "web_requests": []})
+            ],
+            "researcher": [json.dumps({"action": "finish", "summary": "local inspection complete"})],
+        }
+    )
+    runtime.supervisor.model = model
+    runtime.workers["researcher"].model = model
+    task = await runtime.tasks.create(
+        "Do not perform Web research. Build locally without Internet research.",
+        created_by="test",
+    )
+    await runtime.run_task(task.id)
+    stored = await runtime.tasks.get(task.id)
+    assert stored.status.value == "completed"
+    assert stored.result["research_status"] == "not_requested"
+    assert "web_research_unavailable" not in stored.result.get("routing_failures", [])
+
+
+async def test_optional_supervisor_web_failure_does_not_block_task(runtime: Runtime) -> None:
+    runtime.settings.internet_access_enabled = True
+    runtime.web_broker.provider = None
+    model = ScriptedModelProvider(
+        script={
+            "supervisor": [
+                json.dumps(
+                    {
+                        "workers": ["researcher"],
+                        "plan": "inspect",
+                        "web_requests": [{"operation": "web.search", "query": "public docs"}],
+                    }
+                )
+            ],
+            "researcher": [json.dumps({"action": "finish", "summary": "continued locally"})],
+        }
+    )
+    runtime.supervisor.model = model
+    runtime.workers["researcher"].model = model
+    task = await runtime.tasks.create("Inspect the project", created_by="test")
+    await runtime.run_task(task.id)
+    stored = await runtime.tasks.get(task.id)
+    assert stored.status.value == "completed"
+    assert stored.result["research_status"] == "optional_web_unavailable"
+    assert stored.result.get("routing_failures") == []

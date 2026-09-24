@@ -16,6 +16,9 @@ const requiredFiles = ref(""),
   requireReview = ref(false);
 const visualProject = ref(""), repairCycles = ref(2);
 const framework = ref("static");
+const researchRequired = ref(false),
+  webResearchRequired = ref(false),
+  allowDegradedResearch = ref(false);
 const stepsMode = ref("profile"), repairMode = ref("default"), longRun = ref(false);
 const paths = () =>
   requiredFiles.value
@@ -31,6 +34,9 @@ function run() {
     max_repair_cycles: repairMode.value === "unlimited" ? null : repairMode.value === "default" ? 2 : repairCycles.value,
     worker_steps_mode: stepsMode.value,
     long_run_quality: longRun.value,
+    research_required: researchRequired.value,
+    web_research_required: webResearchRequired.value,
+    allow_degraded_research: allowDegradedResearch.value,
     project: props.project.name,
     workspace: props.project.workspace,
     max_steps: stepsMode.value === "custom" && maxSteps.value !== "" ? maxSteps.value : null,
@@ -88,6 +94,13 @@ function run() {
           <input v-model="visualProject" placeholder="my-site" />
         </label>
         <label><input type="checkbox" v-model="longRun" /> Long-Run Quality Mode</label>
+        <fieldset>
+          <legend class="muted">Research requirements</legend>
+          <label><input type="checkbox" v-model="researchRequired" /> Require Researcher execution</label>
+          <label><input type="checkbox" v-model="webResearchRequired" /> Require successful public Web research before implementation</label>
+          <label v-if="webResearchRequired"><input type="checkbox" v-model="allowDegradedResearch" /> Continue in degraded mode if required Web research is unavailable</label>
+          <p class="muted">Prompt wording never changes these deterministic requirements.</p>
+        </fieldset>
         <label v-if="visualProject.trim()">Project framework
           <select v-model="framework" aria-label="Project framework">
             <option value="static">Static HTML</option><option value="flask">Flask + Jinja (optional Vite)</option>
