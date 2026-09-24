@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.errors import ToolExecutionError
 from app.tools.filesystem import Workspace
@@ -108,5 +108,11 @@ def read_manifest(workspace: Workspace, project: str) -> tuple[Path, ProjectMani
         return root, ProjectManifest.model_validate(
             json.loads(raw, object_pairs_hook=_unique_object)
         )
+    except ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc']) or 'project.json'}: {error['msg']}"
+            for error in exc.errors(include_url=False, include_context=False, include_input=False)[:8]
+        )
+        raise ToolExecutionError(f"invalid project manifest: {details}") from None
     except (ValueError, OSError) as exc:
         raise ToolExecutionError(f"invalid project manifest: {type(exc).__name__}") from None
