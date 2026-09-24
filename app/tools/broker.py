@@ -13,6 +13,7 @@ import asyncio
 import json
 from contextvars import ContextVar
 from enum import StrEnum
+from pathlib import PureWindowsPath
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
@@ -98,15 +99,48 @@ class ToolBroker:
                 rule_id="project-execution-boundary",
             )
         if scope and invocation.tool.startswith(("filesystem.", "project.", "browser.")):
-            path = invocation.arguments.get("path", invocation.arguments.get("project", "."))
-            if isinstance(path, str):
-                normalized = file_key(path)
-                if normalized != scope and not normalized.startswith(scope + "/"):
+            is_filesystem = invocation.tool.startswith("filesystem.")
+            field = "path" if is_filesystem else "project"
+            raw_path = invocation.arguments.get(field, ".")
+            if isinstance(raw_path, str):
+                portable = raw_path.replace("\\", "/")
+                normalized = file_key(raw_path)
+                invalid = (
+                    not raw_path.strip()
+                    or "\x00" in raw_path
+                    or raw_path.startswith(("/", "\\", "~"))
+                    or bool(PureWindowsPath(raw_path).drive)
+                    or any(part == ".." for part in portable.split("/"))
+                )
+                if invalid:
                     return await self._deny(
                         principal, invocation.tool, "outside task project", rule_id="project-scope"
                     )
+
+                # Scoped generated-project tasks are project-rooted for models:
+                # "." means the selected project and ordinary relative filesystem
+                # paths such as "templates/base.html" resolve inside that project.
+                # Workspace-prefixed paths remain accepted for compatibility.
+                if normalized == ".":
+                    scoped_path = scope
+                elif normalized == scope or normalized.startswith(scope + "/"):
+                    scoped_path = normalized
+                elif is_filesystem:
+                    scoped_path = file_key(f"{scope}/{normalized}")
+                else:
+                    return await self._deny(
+                        principal, invocation.tool, "outside task project", rule_id="project-scope"
+                    )
+
+                if scoped_path != scope and not scoped_path.startswith(scope + "/"):
+                    return await self._deny(
+                        principal, invocation.tool, "outside task project", rule_id="project-scope"
+                    )
+                invocation = invocation.model_copy(
+                    update={"arguments": {**invocation.arguments, field: scoped_path}}
+                )
                 if invocation.tool == "filesystem.write" and any(
-                    p in {".venv", "node_modules"} for p in normalized.split("/")
+                    p in {".venv", "node_modules"} for p in scoped_path.split("/")
                 ):
                     return await self._deny(
                         principal,
