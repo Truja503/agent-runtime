@@ -481,7 +481,9 @@ async def test_prompt_words_do_not_create_hard_research_requirements(runtime: Ru
             "supervisor": [
                 json.dumps({"workers": ["researcher"], "plan": "inspect", "web_requests": []})
             ],
-            "researcher": [json.dumps({"action": "finish", "summary": "local inspection complete"})],
+            "researcher": [
+                json.dumps({"action": "finish", "summary": "local inspection complete"})
+            ],
         }
     )
     runtime.supervisor.model = model
