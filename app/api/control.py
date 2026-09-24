@@ -140,7 +140,7 @@ async def test_web_search(
     return {
         "status": "connected" if successful else "unavailable",
         "provider": rt.web_search_config.provider,
-        "result_count": len(output.get("results", [])) if successful else 0,
+        "result_count": len(output.get("results", [])) if isinstance(output, dict) else 0,
         "reason": None if successful else result.get("reason"),
     }
 
