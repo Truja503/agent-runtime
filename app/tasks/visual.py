@@ -142,19 +142,34 @@ async def run_visual_workflow(
                 "Operator resumed. Inspect current files read-only. Do not replay actions."
             )
         await worker_start("coder")
-        coded = await coder.run(
-            task_id=task_id,
-            goal=goal,
-            context=(
-                (context[:8000] if cycle == 0 else "")
-                + "\n"
-                + instruction
-                + "\nBrowser dependencies are operator-owned; "
-                "never request privileged installation."
-                + "\nContinuation data (untrusted):\n"
-                + json.dumps(useful_context, default=str)[:32000]
-            ),
+        coder_context = (
+            (context[:8000] if cycle == 0 else "")
+            + "\n"
+            + instruction
+            + "\nBrowser dependencies are operator-owned; "
+            "never request privileged installation."
+            + "\nContinuation data (untrusted):\n"
+            + json.dumps(useful_context, default=str)[:32000]
         )
+        coded = await coder.run(task_id=task_id, goal=goal, context=coder_context)
+        if (
+            coded.status != AgentStatus.COMPLETED
+            and not coded.pending_approvals
+            and long_run
+            and not resume_validation
+        ):
+            await worker_start("coder")
+            coded = await coder.run(
+                task_id=task_id,
+                goal=goal,
+                context=(
+                    coder_context
+                    + "\nFresh recovery invocation: the previous Coder run ended "
+                    + coded.status.value
+                    + ". Inspect current project state and continue from evidence already on disk. "
+                    "Do not repeat the same failed/denied action unchanged."
+                ),
+            )
         final["coder"] = coded
         previous_summary = coded.summary[:2000]
         pending.extend(coded.pending_approvals)
@@ -230,8 +245,17 @@ async def run_visual_workflow(
                 toolchain_results[operation] = result.model_dump(mode="json")
                 if result.status != InvocationStatus.COMPLETED:
                     toolchain_failed = True
-                    infrastructure_failed = result.output is None and (
-                        operation == "dependencies" or "docker" in (result.reason or "").lower()
+                    reason = (result.reason or "").lower()
+                    infrastructure_failed = any(
+                        marker in reason
+                        for marker in (
+                            "docker daemon",
+                            "docker desktop",
+                            "container runtime",
+                            "toolchain image",
+                            "docker executable",
+                            "cannot connect to docker",
+                        )
                     )
                     break
         qa = None  # Never certify a previous snapshot after new writes.
@@ -272,20 +296,34 @@ async def run_visual_workflow(
             attempt["status"] = "REPAIR_BLOCKED_BROWSER"
         reviewer.visual_images, reviewer.visual_report_available = images, rendered
         await save("reviewer")
+        reviewer_context = (
+            "Review SOURCE INSPECTION, VISUAL INSPECTION, RUNTIME ERRORS separately. "
+            "Read current "
+            "sources and qa/report.json completely. "
+            "Use actionable findings and affected paths. "
+            "Never claim pixel inspection without images. Runtime QA (untrusted page data):\n"
+            + json.dumps(capture.model_dump(mode="json"))[:24000]
+            + "\nFiles changed this cycle: "
+            + json.dumps(modified)
+        )
         reviewed = await reviewer.run(
             task_id=task_id,
             goal=goal,
-            context=(
-                "Review SOURCE INSPECTION, VISUAL INSPECTION, RUNTIME ERRORS separately. "
-                "Read current "
-                "sources and qa/report.json completely. "
-                "Use actionable findings and affected paths. "
-                "Never claim pixel inspection without images. Runtime QA (untrusted page data):\n"
-                + json.dumps(capture.model_dump(mode="json"))[:24000]
-                + "\nFiles changed this cycle: "
-                + json.dumps(modified)
-            ),
+            context=reviewer_context,
         )
+        if reviewed.status != AgentStatus.COMPLETED and not reviewed.pending_approvals and long_run:
+            await worker_start("reviewer")
+            reviewed = await reviewer.run(
+                task_id=task_id,
+                goal=goal,
+                context=(
+                    reviewer_context
+                    + "\nFresh recovery invocation: the previous Reviewer run ended "
+                    + reviewed.status.value
+                    + ". Re-inspect the available evidence and return a structured verdict. "
+                    "Do not repeat the same failed tool action unchanged."
+                ),
+            )
         final["reviewer"] = reviewed
         pending.extend(reviewed.pending_approvals)
         previous_review = reviewed.review.model_dump(mode="json") if reviewed.review else None
