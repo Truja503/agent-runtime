@@ -38,7 +38,12 @@ from app.tools.builtin import build_registry, register_project_tools
 from app.tools.filesystem import Workspace
 from app.tools.project import ProjectToolchain
 from app.tools.registry import ToolRegistry
-from app.tools.web import WebBroker
+from app.tools.web import (
+    WebBroker,
+    WebSearchConfiguration,
+    load_web_search_configuration,
+    search_provider_from_config,
+)
 from privileged.audit import AuditSink
 from privileged.auth import OperatorAuthenticator
 from privileged.executor import PrivilegedExecutor
@@ -99,6 +104,7 @@ class Runtime:
     inspection: PromptInspection
     web: WebAgent
     web_broker: WebBroker
+    web_search_config: WebSearchConfiguration
     _background: set[asyncio.Task[None]] = field(default_factory=set)
     _jobs: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _execution_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -513,10 +519,14 @@ def build_runtime(
         if key:
             inspection.privacy.secrets.append(key.get_secret_value())
     events.privacy = inspection.privacy.clean
+    web_search_config = load_web_search_configuration(
+        settings.database_path.with_name("web-search.json")
+    )
     web_broker = WebBroker(
         workspace=workspace,
         enabled=lambda: settings.internet_access_enabled,
         privacy=inspection.privacy,
+        provider=search_provider_from_config(web_search_config),
         events=events,
     )
     register_web_tools(tool_registry, web_broker)
@@ -570,6 +580,7 @@ def build_runtime(
         inspection=inspection,
         web=web,
         web_broker=web_broker,
+        web_search_config=web_search_config,
     )
     tasks.stop_execution = runtime.stop_execution
     return runtime

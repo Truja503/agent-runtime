@@ -20,7 +20,16 @@ from app.tasks.evidence import AcceptanceCriteria, evaluate_acceptance, executio
 from app.tasks.state import Task, TaskOptions
 from app.tools.broker import ToolInvocation
 from app.tools.filesystem import Workspace
-from app.tools.web import MAX_RESPONSE, Response, WebBroker, WebRequest
+from app.tools.web import (
+    MAX_RESPONSE,
+    Response,
+    SearXNGSearchProvider,
+    WebBroker,
+    WebRequest,
+    WebSearchConfiguration,
+    load_web_search_configuration,
+    save_web_search_configuration,
+)
 from tests.conftest import API_TOKEN, VIEWER_TOKEN
 
 
@@ -513,3 +522,59 @@ async def test_optional_supervisor_web_failure_does_not_block_task(runtime: Runt
     assert stored.status.value == "completed"
     assert stored.result["research_status"] == "optional_web_unavailable"
     assert stored.result.get("routing_failures") == []
+
+
+async def test_searxng_provider_normalizes_web_and_image_results() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/search"
+        category = request.url.params.get("categories")
+        if category == "images":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "title": "Chair",
+                            "url": "https://example.com/chair",
+                            "img_src": "https://example.com/chair.jpg",
+                            "content": "Editorial chair",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Flask",
+                        "url": "https://flask.palletsprojects.com/",
+                        "content": "Official docs",
+                    }
+                ]
+            },
+        )
+
+    provider = SearXNGSearchProvider(
+        "http://127.0.0.1:8080",
+        transport=httpx.MockTransport(handler),
+    )
+    web_results = await provider.search("Flask official documentation", images=False)
+    assert web_results[0]["url"] == "https://flask.palletsprojects.com/"
+    image_results = await provider.search("editorial chair", images=True)
+    assert image_results[0]["image_url"] == "https://example.com/chair.jpg"
+
+
+def test_web_search_configuration_persists_and_rejects_remote_plain_http(tmp_path: Any) -> None:
+    path = tmp_path / "web-search.json"
+    config = WebSearchConfiguration(
+        provider="searxng",
+        searxng_base_url="http://127.0.0.1:8080",
+    )
+    save_web_search_configuration(path, config)
+    assert load_web_search_configuration(path) == config
+    with pytest.raises(ValueError):
+        WebSearchConfiguration(
+            provider="searxng",
+            searxng_base_url="http://example.com:8080",
+        )

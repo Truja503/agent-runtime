@@ -21,7 +21,12 @@ from app.models.profiles import ModelConfiguration, ModelPool, configuration_pat
 from app.observability.events import EventType
 from app.tasks.evidence import execution_evidence
 from app.tools.project_manifest import ProjectArgs
-from app.tools.web import WebRequest
+from app.tools.web import (
+    WebRequest,
+    WebSearchConfiguration,
+    save_web_search_configuration,
+    search_provider_from_config,
+)
 
 router = APIRouter(tags=["control"], dependencies=[Depends(current_caller)])
 
@@ -78,6 +83,66 @@ async def browser_readiness(
     _: ApiCaller = Depends(require_operator),
 ) -> dict[str, Any]:
     return await rt.browser_readiness()
+
+
+def public_web_configuration(rt: Runtime) -> dict[str, Any]:
+    return {
+        **rt.web_search_config.model_dump(mode="json"),
+        "configured": rt.web_broker.provider is not None,
+        "internet_enabled": rt.settings.internet_access_enabled,
+    }
+
+
+@router.get("/web/config")
+async def web_configuration(rt: Runtime = Depends(get_runtime)) -> dict[str, Any]:
+    return public_web_configuration(rt)
+
+
+@router.put("/web/config")
+async def update_web_configuration(
+    body: WebSearchConfiguration,
+    rt: Runtime = Depends(get_runtime),
+    caller: ApiCaller = Depends(require_operator),
+) -> dict[str, Any]:
+    if rt._jobs:
+        raise HTTPException(409, "wait for running/queued tasks before changing Web configuration")
+    save_web_search_configuration(rt.settings.database_path.with_name("web-search.json"), body)
+    rt.web_search_config = body
+    rt.web_broker.provider = search_provider_from_config(body)
+    await rt.events.emit(
+        EventType.CONFIGURATION_CHANGED,
+        actor=caller.name,
+        web_search_provider=body.provider,
+    )
+    return public_web_configuration(rt)
+
+
+@router.post("/web/search/test")
+async def test_web_search(
+    rt: Runtime = Depends(get_runtime),
+    _: ApiCaller = Depends(require_operator),
+) -> dict[str, Any]:
+    if rt.web_broker.provider is None:
+        return {
+            "status": "not_configured",
+            "provider": rt.web_search_config.provider,
+            "result_count": 0,
+        }
+    result = await rt.web.execute(
+        WebRequest(
+            operation="web.search",
+            query="Flask official documentation",
+            max_results=3,
+        )
+    )
+    output = result.get("output") if isinstance(result, dict) else None
+    successful = result.get("status") == "completed" and isinstance(output, dict)
+    return {
+        "status": "connected" if successful else "unavailable",
+        "provider": rt.web_search_config.provider,
+        "result_count": len(output.get("results", [])) if successful else 0,
+        "reason": None if successful else result.get("reason"),
+    }
 
 
 @router.post("/web/request")
@@ -309,10 +374,18 @@ async def runtime_state(rt: Runtime = Depends(get_runtime)) -> dict[str, Any]:
             "name": "Web",
             "role": "web",
             "profile": "none",
-            "provider": "deterministic",
+            "provider": (
+                rt.web_search_config.provider
+                if rt.web_broker.provider is not None
+                else "deterministic"
+            ),
             "model": "none (structured executor)",
             "location": "local",
-            "endpoint": "public HTTPS only",
+            "endpoint": (
+                rt.web_search_config.searxng_base_url
+                if rt.web_search_config.provider == "searxng"
+                else "public HTTPS only"
+            ),
             "max_tokens": 0,
             "max_steps": 1,
             "tools": sorted(rt.web.allowed_tools),
@@ -423,6 +496,12 @@ async def runtime_state(rt: Runtime = Depends(get_runtime)) -> dict[str, Any]:
             "internet": {
                 "enabled": rt.settings.internet_access_enabled,
                 "search_provider_configured": rt.web_broker.provider is not None,
+                "search_provider": rt.web_search_config.provider,
+                "search_endpoint": (
+                    rt.web_search_config.searxng_base_url
+                    if rt.web_search_config.provider == "searxng"
+                    else None
+                ),
                 "recent_requests": recent_web,
                 "recent_denied": [r for r in recent_web if r["status"] == "denied"],
             },

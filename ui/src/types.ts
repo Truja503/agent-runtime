@@ -59,11 +59,19 @@ export interface Graph {
   nodes: { id: string; label: string; kind: string; state: string }[];
   edges: { source: string; target: string; state: string }[];
 }
+export interface WebSearchConfiguration {
+  provider: "none" | "searxng";
+  searxng_base_url: string;
+  configured: boolean;
+  internet_enabled: boolean;
+}
 export interface RuntimeState {
   browser?: { status: string; error: string | null; launch_test?: boolean };
   internet?: {
     enabled: boolean;
     search_provider_configured: boolean;
+    search_provider?: string;
+    search_endpoint?: string | null;
     recent_requests: { operation: string; status: string; external_data_sent: string[] }[];
     recent_denied: unknown[];
   };

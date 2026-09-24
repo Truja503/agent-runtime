@@ -11,6 +11,7 @@ import re
 import socket
 import ssl
 import time
+from pathlib import Path
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -19,7 +20,9 @@ from html.parser import HTMLParser
 from typing import Any, Literal, Protocol
 from urllib.parse import unquote, urljoin, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+import httpx
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.errors import ToolExecutionError
 from app.observability.events import EventBus, EventType
@@ -55,6 +58,126 @@ class SearchProvider(Protocol):
     name: str
 
     async def search(self, query: str, *, images: bool) -> list[dict[str, Any]]: ...
+
+
+class WebSearchConfiguration(BaseModel):
+    """Operator-owned search configuration. Contains no secrets."""
+
+    model_config = ConfigDict(extra="forbid")
+    provider: Literal["none", "searxng"] = "none"
+    searxng_base_url: str = "http://127.0.0.1:8080"
+
+    @field_validator("searxng_base_url")
+    @classmethod
+    def validate_searxng_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        parsed = urlsplit(value)
+        host = (parsed.hostname or "").lower()
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not host
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("SearXNG URL must be an HTTP(S) origin without credentials/query")
+        if parsed.scheme == "http" and host not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("plain HTTP SearXNG is allowed only on loopback")
+        return value
+
+
+def load_web_search_configuration(path: Path) -> WebSearchConfiguration:
+    if not path.exists():
+        return WebSearchConfiguration()
+    return WebSearchConfiguration.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def save_web_search_configuration(path: Path, config: WebSearchConfiguration) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(config.model_dump_json(indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+class SearXNGSearchProvider:
+    """Trusted adapter for an operator-configured SearXNG instance."""
+
+    name = "searxng"
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        # Reuse the same validation used by the persisted operator configuration.
+        self.base_url = WebSearchConfiguration(
+            provider="searxng", searxng_base_url=base_url
+        ).searxng_base_url
+        self._transport = transport
+
+    async def search(self, query: str, *, images: bool) -> list[dict[str, Any]]:
+        params = {
+            "q": query,
+            "format": "json",
+            "categories": "images" if images else "general",
+        }
+        async with httpx.AsyncClient(
+            timeout=10,
+            trust_env=False,
+            transport=self._transport,
+        ) as client:
+            response = await client.get(f"{self.base_url}/search", params=params)
+            response.raise_for_status()
+            payload = response.json()
+        rows = payload.get("results", []) if isinstance(payload, dict) else []
+        results: list[dict[str, Any]] = []
+        for row in rows[:100]:
+            if not isinstance(row, dict):
+                continue
+            source_url = str(row.get("url") or "")
+            if not source_url:
+                continue
+            if images:
+                image_url = str(
+                    row.get("img_src")
+                    or row.get("image_src")
+                    or row.get("thumbnail_src")
+                    or ""
+                )
+                if not image_url:
+                    continue
+                results.append(
+                    {
+                        "title": str(row.get("title") or ""),
+                        "url": source_url,
+                        "source_page_url": source_url,
+                        "image_url": image_url,
+                        "snippet": str(row.get("content") or ""),
+                        "creator": row.get("author"),
+                        "width": row.get("img_width") or row.get("width"),
+                        "height": row.get("img_height") or row.get("height"),
+                        "license": None,
+                        "usage": None,
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "title": str(row.get("title") or ""),
+                        "url": source_url,
+                        "source_page_url": source_url,
+                        "snippet": str(row.get("content") or ""),
+                    }
+                )
+        return results
+
+
+def search_provider_from_config(config: WebSearchConfiguration) -> SearchProvider | None:
+    if config.provider == "searxng":
+        return SearXNGSearchProvider(config.searxng_base_url)
+    return None
 
 
 @dataclass

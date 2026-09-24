@@ -7,6 +7,7 @@ import type {
   Event,
   RuntimeState,
   Task,
+  WebSearchConfiguration,
 } from "./types";
 import RuntimeGraph from "./components/RuntimeGraph.vue";
 import AgentInspector from "./components/AgentInspector.vue";
@@ -23,6 +24,8 @@ const token = ref(""),
   loading = ref(false);
 const state = ref<RuntimeState | null>(null),
   configuration = ref<Configuration | null>(null),
+  webConfiguration = ref<WebSearchConfiguration | null>(null),
+  webTest = ref<Record<string, unknown> | null>(null),
   tasks = ref<Task[]>([]),
   selectedId = ref(""),
   selectedNode = ref(""),
@@ -86,6 +89,7 @@ async function connect() {
     const me = await api<{ role: string }>("/auth/whoami");
     role.value = me.role;
     configuration.value = await api<Configuration>("/models");
+    webConfiguration.value = await api<WebSearchConfiguration>("/web/config");
     connected.value = true;
     token.value = "";
     await poll();
@@ -102,10 +106,37 @@ function disconnect() {
   state.value = null;
   tasks.value = [];
   configuration.value = null;
+  webConfiguration.value = null;
+  webTest.value = null;
   selectedId.value = "";
   selectedNode.value = "";
   taskEvents.value = [];
   evidence.value = null;
+}
+async function saveWebConfiguration() {
+  if (!webConfiguration.value) return;
+  error.value = "";
+  notice.value = "";
+  try {
+    webConfiguration.value = await api<WebSearchConfiguration>("/web/config", "PUT", {
+      provider: webConfiguration.value.provider,
+      searxng_base_url: webConfiguration.value.searxng_base_url,
+    });
+    webTest.value = null;
+    await refresh();
+    notice.value = "Web search configuration saved.";
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+async function testWebSearch() {
+  error.value = "";
+  try {
+    webTest.value = await api<Record<string, unknown>>("/web/search/test", "POST");
+    await refresh();
+  } catch (e) {
+    error.value = String(e);
+  }
 }
 async function run(body: Record<string, unknown>) {
   loading.value = true;
@@ -297,9 +328,31 @@ onUnmounted(() => clearTimeout(timer));
             </button>
           </div>
           <section v-if="state.internet" class="panel">
-            <h3>Internet · {{ state.internet.enabled ? "enabled" : "disabled" }}</h3>
-            <p>Search provider: {{ state.internet.search_provider_configured ? "configured" : "not configured" }} · Recent denied requests: {{ state.internet.recent_denied.length }}</p>
-            <p class="muted">Kill switch: INTERNET_ACCESS_ENABLED=false (server configuration)</p>
+            <div class="section-top">
+              <div>
+                <h3>Internet · {{ state.internet.enabled ? "enabled" : "disabled" }}</h3>
+                <p>Search provider: {{ state.internet.search_provider_configured ? state.internet.search_provider : "not configured" }} · Recent denied requests: {{ state.internet.recent_denied.length }}</p>
+              </div>
+              <span class="badge">{{ state.internet.search_provider_configured ? "SEARCH READY" : "SEARCH OFF" }}</span>
+            </div>
+            <p class="muted">Kill switch: INTERNET_ACCESS_ENABLED={{ state.internet.enabled ? "true" : "false" }} (server configuration)</p>
+            <div v-if="webConfiguration" class="form-row">
+              <label>Search provider
+                <select v-model="webConfiguration.provider" :disabled="!editable">
+                  <option value="none">None</option>
+                  <option value="searxng">SearXNG</option>
+                </select>
+              </label>
+              <label v-if="webConfiguration.provider === 'searxng'">SearXNG endpoint
+                <input v-model="webConfiguration.searxng_base_url" :disabled="!editable" placeholder="http://127.0.0.1:8080" />
+              </label>
+            </div>
+            <div v-if="webConfiguration" class="actions">
+              <button :disabled="!editable" @click="saveWebConfiguration">Save search</button>
+              <button :disabled="!editable || !state.internet.enabled || webConfiguration.provider === 'none'" @click="testWebSearch">Test search</button>
+            </div>
+            <p v-if="webTest" class="muted">Search test: {{ webTest.status }} · {{ webTest.result_count ?? 0 }} results</p>
+            <p class="muted">SearXNG configuration is persisted in data/web-search.json; no search query receives the task prompt or workspace files.</p>
             <details><summary>Recent web requests</summary>
               <p v-for="(request, i) in state.internet.recent_requests" :key="i">
                 {{ request.operation }} · {{ request.status }} · External data sent:
