@@ -94,6 +94,32 @@ async def test_unknown_requires_explicit_additional_approval(
     assert calls == ["download", "dependencies"]
 
 
+async def test_package_json_style_manifest_reports_actionable_error(runtime: Runtime) -> None:
+    root = runtime.settings.workspace_root / "wrong-manifest"
+    root.mkdir()
+    (root / "project.json").write_text(
+        json.dumps(
+            {
+                "name": "north-private-retreat",
+                "version": "1.0.0",
+                "dependencies": {"Flask": "2.3.3"},
+                "routes": ["/", "/stay"],
+            }
+        )
+    )
+    result = await runtime.broker.invoke(
+        runtime.workers["coder"].principal("task"),
+        ToolInvocation(
+            tool="project.dependencies",
+            arguments={"project": "wrong-manifest"},
+        ),
+    )
+    assert result.status == "failed"
+    assert result.reason
+    assert "name: Extra inputs are not permitted" in result.reason
+    assert "dependencies: Extra inputs are not permitted" in result.reason
+
+
 async def test_manifest_change_invalidates_approval(
     runtime: Runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
