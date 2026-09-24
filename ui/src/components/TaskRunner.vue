@@ -64,10 +64,10 @@ function run() {
         id="goal"
         v-model="goal"
         rows="4"
-        maxlength="4000"
         required
         placeholder="Describe a concrete goal, files to inspect, and what should be verified."
       />
+      <p class="muted">No runtime character limit · {{ goal.length.toLocaleString() }} characters. Model context windows still apply.</p>
       <div class="form-row">
         <label
           >Routing<select v-model="agent">
