@@ -181,7 +181,7 @@ def can_transition(current: TaskStatus, target: TaskStatus) -> bool:
 
 class Task(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    goal: str = Field(min_length=1, max_length=4000)
+    goal: str = Field(min_length=1)
     status: TaskStatus = TaskStatus.CREATED
     created_by: str = "unknown"
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
