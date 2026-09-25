@@ -86,7 +86,7 @@ def web(
 
 async def test_search_connect_error_is_contained(
     workspace: Workspace,
-    privacy: PrivacyFilter,
+    settings: Settings,
 ) -> None:
     class BrokenProvider:
         name = "broken"
@@ -98,7 +98,7 @@ async def test_search_connect_error_is_contained(
     broker = WebBroker(
         workspace=workspace,
         enabled=lambda: True,
-        privacy=privacy,
+        privacy=PrivacyFilter(settings),
         provider=BrokenProvider(),
     )
     result = await broker.execute(WebRequest(operation="web.search", query="Flask SQLAlchemy"))
