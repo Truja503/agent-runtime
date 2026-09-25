@@ -408,7 +408,14 @@ class WebBroker:
                 result = await self._execute(request, entry)
             entry["status"] = result.get("status", "completed")
             return result
-        except (ToolExecutionError, OSError, ValueError, TimeoutError, http.client.HTTPException):
+        except (
+            ToolExecutionError,
+            OSError,
+            ValueError,
+            TimeoutError,
+            http.client.HTTPException,
+            httpx.HTTPError,
+        ):
             # Never expose remote exception text, headers, credentials or rejected input.
             entry["status"] = "denied"
             entry["reason"] = (
