@@ -88,6 +88,30 @@ def web(
     "operation",
     ["web.search", "web.fetch", "docs.fetch", "assets.search_images", "assets.import_image"],
 )
+async def test_search_connect_error_is_contained(
+    workspace: Workspace,
+    privacy: PrivacyFilter,
+) -> None:
+    class BrokenProvider:
+        name = "broken"
+
+        async def search(self, query: str, *, images: bool) -> list[dict[str, Any]]:
+            request = httpx.Request("GET", "http://127.0.0.1:8080/search")
+            raise httpx.ConnectError("connection failed", request=request)
+
+    broker = WebBroker(
+        workspace=workspace,
+        enabled=lambda: True,
+        privacy=privacy,
+        provider=BrokenProvider(),
+    )
+    result = await broker.execute(WebRequest(operation="web.search", query="Flask SQLAlchemy"))
+
+    assert result["status"] == "denied"
+    assert result["sources"] == []
+    assert "connection failed" not in result["error"]
+
+
 async def test_kill_switch_denies_every_web_tool(runtime: Runtime, operation: Any) -> None:
     runtime.settings.internet_access_enabled = False
     result = await runtime.web.execute(
