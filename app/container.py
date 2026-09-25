@@ -147,13 +147,24 @@ class Runtime:
                     break
                 await asyncio.sleep(0.25)
             status = ticket.status if ticket else "missing"
-            reason = {
-                "denied": "approval_rejected",
-                "rejected": "approval_rejected",
-                "expired": "approval_expired",
-                "missing": "approval_missing",
-            }.get(status, f"approval_{status}")
             output = ticket.result if ticket else None
+            if status == "failed":
+                detail = ticket.reason if ticket else None
+                if not detail and isinstance(output, dict):
+                    detail = str(
+                        output.get("output")
+                        or output.get("reason")
+                        or output.get("error")
+                        or ""
+                    )[-4000:]
+                reason = "approval_failed" + (f": {detail}" if detail else "")
+            else:
+                reason = {
+                    "denied": "approval_rejected",
+                    "rejected": "approval_rejected",
+                    "expired": "approval_expired",
+                    "missing": "approval_missing",
+                }.get(status, f"approval_{status}")
             resolved = ToolResult(
                 status=InvocationStatus.COMPLETED
                 if status == "executed"
