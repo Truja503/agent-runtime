@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { api, pretty, terminal, taskTitle } from "../api";
 import type { Acceptance, Review, Evidence, Event, Task, Workflow } from "../types";
+import ProjectToolchain from "./ProjectToolchain.vue";
 const props = defineProps<{
   task: Task;
   events: Event[];
@@ -11,6 +12,16 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ cancel: []; resume: [] }>();
 const workflow = computed(() => props.task.result?.workflow as Workflow | undefined);
+const toolchainProject = computed(() => {
+  if (props.task.options.visual_project) return props.task.options.visual_project;
+  const request = [...props.events].reverse().find(
+    (e) =>
+      e.type === "privileged_action_requested" &&
+      e.payload.tool === "project.dependencies" &&
+      typeof e.payload.project === "string",
+  );
+  return request ? String(request.payload.project) : null;
+});
 const qaStatus = computed(() => {
   const qa = workflow.value?.latest_qa;
   if (!qa?.screenshots_generated) return "Not rendered";
@@ -111,6 +122,7 @@ async function loadPrompts() {
       }}</span>
     </div>
     <details><summary>Task instructions</summary><pre>{{ task.goal }}</pre></details>
+    <ProjectToolchain v-if="toolchainProject" :project="toolchainProject" :editable="editable" :checkpoint="task.status + ':' + workflow?.stage" />
     <div v-if="workflow" class="notice">
       <strong v-if="task.options.long_run_quality">LONG-RUN · </strong>
       <strong v-if="workflow.cycle_number !== undefined">Cycle {{ workflow.cycle_number }} / {{ workflow.cycle_limit === null ? '∞' : workflow.cycle_limit }}</strong>

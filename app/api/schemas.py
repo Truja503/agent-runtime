@@ -18,7 +18,7 @@ from app.tasks.state import Task, TaskOptions
 
 
 class CreateTaskRequest(TaskOptions):
-    goal: str = Field(min_length=1, max_length=4000)
+    goal: str = Field(min_length=1)
 
 
 class TaskResponse(BaseModel):

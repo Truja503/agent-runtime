@@ -23,6 +23,7 @@ from app.config import ProviderKind, Settings
 from app.container import build_runtime
 from app.models.scripted import ScriptedModelProvider
 from app.observability.store import InMemoryEventStore
+from app.tasks.state import TaskStatus
 from app.tasks.store import InMemoryTaskStore
 from app.tools.builtin import build_registry
 from app.tools.filesystem import Workspace
@@ -119,8 +120,13 @@ async def main() -> None:
     )
 
     privileged_task = await runtime.tasks.create("reinicia nginx", created_by="demo")
-    await runtime.run_task(privileged_task.id)
-    parked = await runtime.tasks.get(privileged_task.id)
+    execution = asyncio.create_task(runtime.run_task(privileged_task.id))
+    async with asyncio.timeout(5):
+        while True:
+            parked = await runtime.tasks.get(privileged_task.id)
+            if parked.status is TaskStatus.WAITING_FOR_APPROVAL:
+                break
+            await asyncio.sleep(0.01)
     print(f"task status      : {parked.status.value}")
     print(f"commands executed: {runner.calls}   <- nothing, and no human involved yet")
 
@@ -148,6 +154,9 @@ async def main() -> None:
     executed = await privileged.approve_and_execute(
         request_id=record.request_id, operator_id=OPERATOR_ID, secret=OPERATOR_SECRET
     )
+    await execution
+    resumed = await runtime.tasks.get(privileged_task.id)
+    print(f"task      : {resumed.status.value}")
     print(f"status    : {executed.status.value}")
     print(f"approved  : {executed.approved_by}")
     print(f"argv      : {executed.result.argv if executed.result else '-'}")

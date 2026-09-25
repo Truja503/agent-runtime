@@ -20,7 +20,16 @@ from app.tasks.evidence import AcceptanceCriteria, evaluate_acceptance, executio
 from app.tasks.state import Task, TaskOptions
 from app.tools.broker import ToolInvocation
 from app.tools.filesystem import Workspace
-from app.tools.web import MAX_RESPONSE, Response, WebBroker, WebRequest
+from app.tools.web import (
+    MAX_RESPONSE,
+    Response,
+    SearXNGSearchProvider,
+    WebBroker,
+    WebRequest,
+    WebSearchConfiguration,
+    load_web_search_configuration,
+    save_web_search_configuration,
+)
 from tests.conftest import API_TOKEN, VIEWER_TOKEN
 
 
@@ -73,6 +82,30 @@ def web(
         sender=internet.send,
         **kwargs,
     )
+
+
+async def test_search_connect_error_is_contained(
+    workspace: Workspace,
+    settings: Settings,
+) -> None:
+    class BrokenProvider:
+        name = "broken"
+
+        async def search(self, query: str, *, images: bool) -> list[dict[str, Any]]:
+            request = httpx.Request("GET", "http://127.0.0.1:8080/search")
+            raise httpx.ConnectError("connection failed", request=request)
+
+    broker = WebBroker(
+        workspace=workspace,
+        enabled=lambda: True,
+        privacy=PrivacyFilter(settings),
+        provider=BrokenProvider(),
+    )
+    result = await broker.execute(WebRequest(operation="web.search", query="Flask SQLAlchemy"))
+
+    assert result["status"] == "denied"
+    assert result["sources"] == []
+    assert "connection failed" not in result["error"]
 
 
 @pytest.mark.parametrize(
@@ -464,3 +497,110 @@ async def test_supervisor_sends_structured_request_not_goal(runtime: Runtime) ->
     result = (await runtime.tasks.get(task.id)).result
     assert result["web_results"][0]["output"]["sources"] == ["https://example.com/docs"]
     assert any(e.type.value == "web_egress" for e in await runtime.tasks.events_for(task.id))
+
+
+async def test_prompt_words_do_not_create_hard_research_requirements(runtime: Runtime) -> None:
+    model = ScriptedModelProvider(
+        script={
+            "supervisor": [
+                json.dumps({"workers": ["researcher"], "plan": "inspect", "web_requests": []})
+            ],
+            "researcher": [
+                json.dumps({"action": "finish", "summary": "local inspection complete"})
+            ],
+        }
+    )
+    runtime.supervisor.model = model
+    runtime.workers["researcher"].model = model
+    task = await runtime.tasks.create(
+        "Do not perform Web research. Build locally without Internet research.",
+        created_by="test",
+    )
+    await runtime.run_task(task.id)
+    stored = await runtime.tasks.get(task.id)
+    assert stored.status.value == "completed"
+    assert stored.result["research_status"] == "not_requested"
+    assert "web_research_unavailable" not in stored.result.get("routing_failures", [])
+
+
+async def test_optional_supervisor_web_failure_does_not_block_task(runtime: Runtime) -> None:
+    runtime.settings.internet_access_enabled = True
+    runtime.web_broker.provider = None
+    model = ScriptedModelProvider(
+        script={
+            "supervisor": [
+                json.dumps(
+                    {
+                        "workers": ["researcher"],
+                        "plan": "inspect",
+                        "web_requests": [{"operation": "web.search", "query": "public docs"}],
+                    }
+                )
+            ],
+            "researcher": [json.dumps({"action": "finish", "summary": "continued locally"})],
+        }
+    )
+    runtime.supervisor.model = model
+    runtime.workers["researcher"].model = model
+    task = await runtime.tasks.create("Inspect the project", created_by="test")
+    await runtime.run_task(task.id)
+    stored = await runtime.tasks.get(task.id)
+    assert stored.status.value == "completed"
+    assert stored.result["research_status"] == "optional_web_unavailable"
+    assert stored.result.get("routing_failures") == []
+
+
+async def test_searxng_provider_normalizes_web_and_image_results() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/search"
+        category = request.url.params.get("categories")
+        if category == "images":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "title": "Chair",
+                            "url": "https://example.com/chair",
+                            "img_src": "https://example.com/chair.jpg",
+                            "content": "Editorial chair",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Flask",
+                        "url": "https://flask.palletsprojects.com/",
+                        "content": "Official docs",
+                    }
+                ]
+            },
+        )
+
+    provider = SearXNGSearchProvider(
+        "http://127.0.0.1:8080",
+        transport=httpx.MockTransport(handler),
+    )
+    web_results = await provider.search("Flask official documentation", images=False)
+    assert web_results[0]["url"] == "https://flask.palletsprojects.com/"
+    image_results = await provider.search("editorial chair", images=True)
+    assert image_results[0]["image_url"] == "https://example.com/chair.jpg"
+
+
+def test_web_search_configuration_persists_and_rejects_remote_plain_http(tmp_path: Any) -> None:
+    path = tmp_path / "web-search.json"
+    config = WebSearchConfiguration(
+        provider="searxng",
+        searxng_base_url="http://127.0.0.1:8080",
+    )
+    save_web_search_configuration(path, config)
+    assert load_web_search_configuration(path) == config
+    with pytest.raises(ValueError):
+        WebSearchConfiguration(
+            provider="searxng",
+            searxng_base_url="http://example.com:8080",
+        )

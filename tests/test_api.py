@@ -112,6 +112,13 @@ async def test_goal_is_validated(client: httpx.AsyncClient) -> None:
     assert (await client.post("/tasks", json={"goal": ""}, headers=AUTH)).status_code == 422
 
 
+async def test_long_goal_is_accepted(client: httpx.AsyncClient) -> None:
+    goal = "architecture benchmark " * 1000
+    response = await client.post("/tasks", json={"goal": goal}, headers=AUTH)
+    assert response.status_code == 201
+    assert response.json()["goal"] == goal
+
+
 async def test_tool_listing_shows_metadata(client: httpx.AsyncClient) -> None:
     response = await client.get("/tools", headers=AUTH)
     assert response.status_code == 200

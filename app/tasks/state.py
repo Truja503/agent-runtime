@@ -25,6 +25,7 @@ class TaskOptions(BaseModel):
     workspace: str = ""
     acceptance: AcceptanceCriteria = Field(default_factory=AcceptanceCriteria)
     visual_project: str | None = Field(default=None, min_length=1, max_length=1024)
+    project_framework: Literal["static", "flask"] = "static"
     max_repair_cycles: int | None = Field(default=2, ge=0)
     long_run_quality: bool = False
     research_required: bool = False
@@ -58,25 +59,34 @@ class TaskOptions(BaseModel):
 
     @model_validator(mode="after")
     def visual_requirements(self) -> TaskOptions:
+        if self.project_framework == "flask" and not self.visual_project:
+            raise ValueError("Flask tasks require a confined visual_project")
         if self.visual_project:
             if self.agent not in {"auto", "supervisor"}:
                 raise ValueError("visual QA workflow requires auto/supervisor routing")
             self.acceptance.required_visual_qa = True
+            if self.project_framework == "flask":
+                self.acceptance.required_project_toolchain = True
             self.acceptance.required_workers = list(
                 dict.fromkeys([*self.acceptance.required_workers, "coder", "reviewer"])
             )
             self.acceptance.required_review_verdict = (
                 self.acceptance.required_review_verdict or "pass_or_warnings"
             )
-            if self.long_run_quality or self.max_repair_cycles is None:
+            if (
+                self.long_run_quality
+                or self.max_repair_cycles is None
+                or self.project_framework == "flask"
+            ):
                 self.acceptance.required_review_verdict = "pass"
                 self.acceptance.require_readback_all_modified = True
                 prefix = self.visual_project.rstrip("/\\")
+                entry = "app.py" if self.project_framework == "flask" else "index.html"
                 self.acceptance.required_files = list(
                     dict.fromkeys(
                         [
                             *self.acceptance.required_files,
-                            file_key(f"{prefix}/index.html"),
+                            file_key(f"{prefix}/{entry}"),
                             file_key(f"{prefix}/qa/report.json"),
                         ]
                     )
@@ -171,7 +181,7 @@ def can_transition(current: TaskStatus, target: TaskStatus) -> bool:
 
 class Task(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    goal: str = Field(min_length=1, max_length=4000)
+    goal: str = Field(min_length=1)
     status: TaskStatus = TaskStatus.CREATED
     created_by: str = "unknown"
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

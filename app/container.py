@@ -27,17 +27,23 @@ from app.observability.prompts import PrivacyFilter, PromptInspection
 from app.observability.store import SQLiteEventStore
 from app.policy.engine import PolicyEngine
 from app.privileged_bridge import InProcessPrivilegedGateway, PrivilegedGateway
-from app.tasks.evidence import evaluate_acceptance, execution_evidence
+from app.tasks.evidence import evaluate_acceptance, execution_evidence, file_key
 from app.tasks.manager import TaskManager
 from app.tasks.state import TERMINAL_STATUSES, TaskStatus, TaskStore
 from app.tasks.store import SQLiteTaskStore
 from app.tasks.visual import run_visual_workflow
 from app.tools.broker import InvocationStatus, ToolBroker, ToolResult
 from app.tools.browser import BrowserTools
-from app.tools.builtin import build_registry
+from app.tools.builtin import build_registry, register_project_tools
 from app.tools.filesystem import Workspace
+from app.tools.project import ProjectToolchain
 from app.tools.registry import ToolRegistry
-from app.tools.web import WebBroker
+from app.tools.web import (
+    WebBroker,
+    WebSearchConfiguration,
+    load_web_search_configuration,
+    search_provider_from_config,
+)
 from privileged.audit import AuditSink
 from privileged.auth import OperatorAuthenticator
 from privileged.executor import PrivilegedExecutor
@@ -84,6 +90,7 @@ class Runtime:
     """The assembled application."""
 
     settings: Settings
+    projects: ProjectToolchain
     events: EventBus
     tasks: TaskManager
     registry: ToolRegistry
@@ -97,6 +104,7 @@ class Runtime:
     inspection: PromptInspection
     web: WebAgent
     web_broker: WebBroker
+    web_search_config: WebSearchConfiguration
     _background: set[asyncio.Task[None]] = field(default_factory=set)
     _jobs: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _execution_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -111,6 +119,11 @@ class Runtime:
             Workspace(self.settings.workspace_root)
         ).readiness()
         return self.inspection.privacy.clean(self.browser_health)
+
+    async def approval_status(self, request_id: str) -> Any:
+        if request_id.startswith("dep-"):
+            return await self.projects.ticket(request_id)
+        return await self.privileged_gateway.status(request_id)
 
     async def wait_for_approval(self, task_id: str, result: ToolResult) -> ToolResult:
         assert result.request_id
@@ -129,18 +142,29 @@ class Runtime:
         try:
             while True:
                 self.broker.check_cancelled(task_id)
-                ticket = await self.privileged_gateway.status(result.request_id)
+                ticket = await self.approval_status(result.request_id)
                 if ticket is None or ticket.status != "awaiting_approval":
                     break
                 await asyncio.sleep(0.25)
             status = ticket.status if ticket else "missing"
-            reason = {
-                "denied": "approval_rejected",
-                "rejected": "approval_rejected",
-                "expired": "approval_expired",
-                "missing": "approval_missing",
-            }.get(status, f"approval_{status}")
             output = ticket.result if ticket else None
+            if status == "failed":
+                detail = ticket.reason if ticket else None
+                if not detail and isinstance(output, dict):
+                    detail = str(
+                        output.get("output")
+                        or output.get("reason")
+                        or output.get("error")
+                        or ""
+                    )[-4000:]
+                reason = "approval_failed" + (f": {detail}" if detail else "")
+            else:
+                reason = {
+                    "denied": "approval_rejected",
+                    "rejected": "approval_rejected",
+                    "expired": "approval_expired",
+                    "missing": "approval_missing",
+                }.get(status, f"approval_{status}")
             resolved = ToolResult(
                 status=InvocationStatus.COMPLETED
                 if status == "executed"
@@ -192,7 +216,7 @@ class Runtime:
                 )
             records = []
             for request_id in ids:
-                ticket = await self.privileged_gateway.status(request_id)
+                ticket = await self.approval_status(request_id)
                 records.append(
                     {"request_id": request_id, "status": ticket.status if ticket else "missing"}
                 )
@@ -215,6 +239,7 @@ class Runtime:
 
     async def start(self) -> None:
         if not self._started:
+            await self.projects.recover()
             await self.tasks.reconcile_startup()
             await self.reconcile_approvals()
             await self.browser_readiness()
@@ -257,6 +282,8 @@ class Runtime:
             async with self._execution_lock:
                 await self._execute_task(task_id)
         finally:
+            await self.projects.stop_task(task_id)
+            self.broker.project_scopes.pop(task_id, None)
             self._jobs.pop(task_id, None)
             self.active_agents.pop(task_id, None)
 
@@ -266,6 +293,8 @@ class Runtime:
             return
         try:
             self.broker.check_cancelled(task_id)
+            if task.options.project_framework == "flask" and task.options.visual_project:
+                self.broker.project_scopes[task_id] = file_key(task.options.visual_project)
             workers = {name: copy.copy(worker) for name, worker in self.workers.items()}
             supervisor = copy.copy(self.supervisor)
             supervisor._workers = {name: workers[name] for name in self.supervisor._workers}
@@ -347,6 +376,7 @@ class Runtime:
                     criteria=task.options.acceptance,
                     context=context,
                     long_run=task.options.long_run_quality,
+                    toolchain=task.options.project_framework == "flask",
                     checkpoint=checkpoint,
                     restored=(task.result or {}).get("workflow")
                     if (task.result or {}).get("resume_requested")
@@ -439,6 +469,7 @@ class Runtime:
         await self.tasks.complete(task_id, outcome)
 
     async def aclose(self) -> None:
+        await self.projects.stop_task(None)
         for job in list(self._background):
             job.cancel()
         await asyncio.gather(*self._background, return_exceptions=True)
@@ -473,7 +504,18 @@ def build_runtime(
     gateway = InProcessPrivilegedGateway(privileged)
 
     workspace = Workspace(settings.workspace_root)
-    tool_registry = registry or build_registry(workspace=workspace)
+    projects = ProjectToolchain(
+        workspace,
+        settings.database_path.with_name("toolchain.db"),
+        settings.project_toolchain_image,
+    )
+    tool_registry = registry or build_registry(workspace=workspace, projects=projects)
+    register_project_tools(tool_registry, projects)
+    if registry:
+        for name in ("browser.preview", "browser.screenshot", "browser.console_errors"):
+            handler = getattr(tool_registry.get(name).handler, "__self__", None)
+            if isinstance(handler, BrowserTools):
+                handler.projects = projects
     broker = ToolBroker(
         registry=tool_registry,
         policy=PolicyEngine(),
@@ -488,10 +530,14 @@ def build_runtime(
         if key:
             inspection.privacy.secrets.append(key.get_secret_value())
     events.privacy = inspection.privacy.clean
+    web_search_config = load_web_search_configuration(
+        settings.database_path.with_name("web-search.json")
+    )
     web_broker = WebBroker(
         workspace=workspace,
         enabled=lambda: settings.internet_access_enabled,
         privacy=inspection.privacy,
+        provider=search_provider_from_config(web_search_config),
         events=events,
     )
     register_web_tools(tool_registry, web_broker)
@@ -531,6 +577,7 @@ def build_runtime(
 
     runtime = Runtime(
         settings=settings,
+        projects=projects,
         events=events,
         tasks=tasks,
         registry=tool_registry,
@@ -544,6 +591,7 @@ def build_runtime(
         inspection=inspection,
         web=web,
         web_broker=web_broker,
+        web_search_config=web_search_config,
     )
     tasks.stop_execution = runtime.stop_execution
     return runtime

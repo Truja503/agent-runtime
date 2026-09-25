@@ -13,6 +13,7 @@ import asyncio
 import json
 from contextvars import ContextVar
 from enum import StrEnum
+from pathlib import PureWindowsPath
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
@@ -22,6 +23,7 @@ from app.observability.events import EventBus, EventType
 from app.policy.engine import Effect, PolicyEngine
 from app.policy.permissions import Principal
 from app.privileged_bridge import PrivilegedGateway
+from app.tasks.evidence import file_key
 from app.tools.registry import ToolRegistry
 
 CURRENT_TOOL_TASK: ContextVar[str | None] = ContextVar("current_tool_task", default=None)
@@ -79,6 +81,7 @@ class ToolBroker:
         self._events = events
         self._privileged_gateway = privileged_gateway
         self.cancelled_tasks: set[str] = set()
+        self.project_scopes: dict[str, str] = {}
 
     def check_cancelled(self, task_id: str | None) -> None:
         if task_id in self.cancelled_tasks:
@@ -87,6 +90,64 @@ class ToolBroker:
     async def invoke(self, principal: Principal, invocation: ToolInvocation) -> ToolResult:
         task_id = principal.task_id
         self.check_cancelled(task_id)
+        scope = self.project_scopes.get(task_id or "")
+        if scope and invocation.tool == "tests.run":
+            return await self._deny(
+                principal,
+                invocation.tool,
+                "generated projects must use isolated project.test",
+                rule_id="project-execution-boundary",
+            )
+        if scope and invocation.tool.startswith(("filesystem.", "project.", "browser.")):
+            is_filesystem = invocation.tool.startswith("filesystem.")
+            field = "path" if is_filesystem else "project"
+            raw_path = invocation.arguments.get(field, ".")
+            if isinstance(raw_path, str):
+                portable = raw_path.replace("\\", "/")
+                normalized = file_key(raw_path)
+                invalid = (
+                    not raw_path.strip()
+                    or "\x00" in raw_path
+                    or raw_path.startswith(("/", "\\", "~"))
+                    or bool(PureWindowsPath(raw_path).drive)
+                    or any(part == ".." for part in portable.split("/"))
+                )
+                if invalid:
+                    return await self._deny(
+                        principal, invocation.tool, "outside task project", rule_id="project-scope"
+                    )
+
+                # Scoped generated-project tasks are project-rooted for models:
+                # "." means the selected project and ordinary relative filesystem
+                # paths such as "templates/base.html" resolve inside that project.
+                # Workspace-prefixed paths remain accepted for compatibility.
+                if normalized == ".":
+                    scoped_path = scope
+                elif normalized == scope or normalized.startswith(scope + "/"):
+                    scoped_path = normalized
+                elif is_filesystem:
+                    scoped_path = file_key(f"{scope}/{normalized}")
+                else:
+                    return await self._deny(
+                        principal, invocation.tool, "outside task project", rule_id="project-scope"
+                    )
+
+                if scoped_path != scope and not scoped_path.startswith(scope + "/"):
+                    return await self._deny(
+                        principal, invocation.tool, "outside task project", rule_id="project-scope"
+                    )
+                invocation = invocation.model_copy(
+                    update={"arguments": {**invocation.arguments, field: scoped_path}}
+                )
+                if invocation.tool == "filesystem.write" and any(
+                    p in {".venv", "node_modules"} for p in scoped_path.split("/")
+                ):
+                    return await self._deny(
+                        principal,
+                        invocation.tool,
+                        "environment is runtime-owned",
+                        rule_id="project-environment",
+                    )
         await self._events.emit(
             EventType.TOOL_REQUESTED,
             task_id=task_id,
@@ -166,6 +227,22 @@ class ToolBroker:
             )
             return ToolResult(status=InvocationStatus.FAILED, tool=spec.name, reason=str(exc))
 
+        if spec.name == "project.dependencies" and output.get("status") == "approval_required":
+            await self._events.emit(
+                EventType.PRIVILEGED_ACTION_REQUESTED,
+                task_id=task_id,
+                actor=principal.name,
+                tool=spec.name,
+                request_id=output["request_id"],
+                project=output["project"],
+            )
+            return ToolResult(
+                status=InvocationStatus.APPROVAL_REQUIRED,
+                tool=spec.name,
+                request_id=output["request_id"],
+                output=output,
+            )
+
         if (
             spec.name
             in {
@@ -185,13 +262,18 @@ class ToolBroker:
                 rule_id="web-egress",
             )
 
-        if spec.name.startswith(("web.", "docs.", "assets.", "browser.")) and output.get(
-            "status"
-        ) in {
+        if spec.name.startswith(
+            ("web.", "docs.", "assets.", "browser.", "project.")
+        ) and output.get("status") in {
             "not_configured",
             "failed",
         }:
-            reason = str(output.get("reason") or output.get("error") or "web request failed")
+            reason = str(
+                output.get("reason")
+                or output.get("error")
+                or output.get("output")
+                or "tool operation failed"
+            )[-8000:]
             if output.get("error_code") == "browser_unavailable":
                 reason = "browser_unavailable: " + reason
             await self._events.emit(
@@ -235,6 +317,11 @@ class ToolBroker:
                     "screenshots",
                     "report_path",
                     "previews",
+                    "routes",
+                    "status",
+                    "environment",
+                    "output",
+                    "url",
                 }
             },
         )

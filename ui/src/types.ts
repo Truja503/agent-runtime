@@ -59,11 +59,19 @@ export interface Graph {
   nodes: { id: string; label: string; kind: string; state: string }[];
   edges: { source: string; target: string; state: string }[];
 }
+export interface WebSearchConfiguration {
+  provider: "none" | "searxng";
+  searxng_base_url: string;
+  configured: boolean;
+  internet_enabled: boolean;
+}
 export interface RuntimeState {
   browser?: { status: string; error: string | null; launch_test?: boolean };
   internet?: {
     enabled: boolean;
     search_provider_configured: boolean;
+    search_provider?: string;
+    search_endpoint?: string | null;
     recent_requests: { operation: string; status: string; external_data_sent: string[] }[];
     recent_denied: unknown[];
   };
@@ -82,7 +90,7 @@ export interface Task {
   result: Record<string, unknown> | null;
   error: string | null;
   options: { project: string; workspace: string; agent: string; visual_project?: string | null;
-    long_run_quality?: boolean; worker_steps_mode?: string; max_repair_cycles?: number | null };
+    long_run_quality?: boolean; worker_steps_mode?: string; max_repair_cycles?: number | null; project_framework?: string };
 }
 export interface Workflow {
   cycle_number: number; cycle_limit: number | null; stage: string;

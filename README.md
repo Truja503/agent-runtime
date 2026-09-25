@@ -764,6 +764,10 @@ Task statuses: `created → planning → running → reviewing → completed`, w
 
 ## Tests
 
+Generated Flask/Jinja applications use the [controlled project toolchain](docs/project-toolchain.md):
+operator-approved exact dependencies, isolated Docker execution, optional Vite builds,
+project-local pytest and multi-route Chromium QA. No shell tool is exposed to agents.
+
 The automated suite uses mocked model transports; real Ollama verification is recorded separately.
 
 | File | Covers |

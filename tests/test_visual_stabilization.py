@@ -298,6 +298,53 @@ async def test_rejected_request_is_not_pending(runtime: Runtime) -> None:
     assert not await runtime.privileged_service.list_pending()
 
 
+async def test_optional_research_does_not_gate_visual_implementation(runtime: Runtime) -> None:
+    calls = mock_qa(runtime)
+    runtime.supervisor.model = ScriptedModelProvider(
+        script={
+            "supervisor": [
+                json.dumps(
+                    {
+                        "workers": ["researcher", "coder", "reviewer"],
+                        "plan": "Repair the existing generated project",
+                        "web_requests": [
+                            {"operation": "web.search", "query": "Flask project recovery"}
+                        ],
+                    }
+                )
+            ]
+        }
+    )
+    model = ScriptedModelProvider(
+        script={
+            "researcher": [tool("filesystem.write", "project.json", content="bad")],
+            "coder": [finish()],
+            "reviewer": [review("pass")],
+        }
+    )
+    for worker in runtime.workers.values():
+        worker.model = model
+
+    task = await runtime.tasks.create(
+        "Repair an existing visual Flask project without required research",
+        created_by="test",
+        options=TaskOptions(visual_project="site", project_framework="flask"),
+    )
+    await runtime.run_task(task.id)
+    result = await runtime.tasks.get(task.id)
+    starts = [
+        e.actor
+        for e in await runtime.tasks.events_for(task.id)
+        if e.type == EventType.AGENT_STARTED
+    ]
+    assert "researcher" not in starts
+    assert "coder" in starts
+    # This test isolates routing only. The empty generated project may still
+    # fail later toolchain acceptance, but optional Researcher must not gate Coder.
+    assert result.status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.STALLED}
+    assert calls in ([], ["qa"])
+
+
 async def test_research_web_coder_qa_reviewer_order(runtime: Runtime) -> None:
     calls = mock_qa(runtime)
     spec = runtime.registry.get("web.search")
@@ -327,7 +374,11 @@ async def test_research_web_coder_qa_reviewer_order(runtime: Runtime) -> None:
     task = await runtime.tasks.create(
         "Research current official documentation using Web, then build",
         created_by="test",
-        options=TaskOptions(visual_project="site"),
+        options=TaskOptions(
+            visual_project="site",
+            research_required=True,
+            web_research_required=True,
+        ),
     )
     await runtime.run_task(task.id)
     result = await runtime.tasks.get(task.id)
@@ -368,7 +419,9 @@ async def test_research_only_task_cannot_claim_unexecuted_web_research(runtime: 
     )
     runtime.workers["researcher"].model = ScriptedModelProvider(script={"researcher": [finish()]})
     task = await runtime.tasks.create(
-        "Research current official Web documentation", created_by="test"
+        "Research current official Web documentation",
+        created_by="test",
+        options=TaskOptions(research_required=True, web_research_required=True),
     )
     await runtime.run_task(task.id)
     result = await runtime.tasks.get(task.id)
@@ -406,11 +459,18 @@ async def test_required_research_cannot_be_skipped(runtime: Runtime, degraded: b
     task = await runtime.tasks.create(
         "Research current official documentation using Web then build",
         created_by="test",
-        options=TaskOptions(visual_project="site", allow_degraded_research=degraded),
+        options=TaskOptions(
+            visual_project="site",
+            research_required=True,
+            web_research_required=True,
+            allow_degraded_research=degraded,
+        ),
     )
     await runtime.run_task(task.id)
     result = await runtime.tasks.get(task.id)
-    assert result.result and result.result["research_status"] == "web_research_unavailable"
+    assert result.result
+    expected_research = "degraded" if degraded else "web_research_unavailable"
+    assert result.result["research_status"] == expected_research
     assert bool(calls) is degraded
     assert result.status == (TaskStatus.COMPLETED if degraded else TaskStatus.FAILED)
     starts = [

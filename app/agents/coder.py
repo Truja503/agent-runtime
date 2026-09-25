@@ -27,6 +27,12 @@ class CoderAgent(WorkerAgent):
             "filesystem.list",
             "filesystem.write",
             "tests.run",
+            "project.inspect",
+            "project.build",
+            "project.serve",
+            "project.stop",
+            "project.test",
+            "project.dependencies",
             "browser.preview",
             "browser.screenshot",
             "browser.console_errors",
@@ -34,6 +40,24 @@ class CoderAgent(WorkerAgent):
         }
     )
     mandate = (
+        "For generated Flask projects, project.json is NOT package.json. It is a strict data-only "
+        "runtime manifest and may contain ONLY schema_version, framework, frontend, python, npm, "
+        "and routes. Exact shape example: "
+        "{\\\"schema_version\\\":1,\\\"framework\\\":\\\"flask\\\","
+        "\\\"frontend\\\":\\\"none\\\",\\\"python\\\":{\\\"flask\\\":\\\"3.1.2\\\","
+        "\\\"flask-sqlalchemy\\\":\\\"3.1.1\\\",\\\"pytest\\\":\\\"8.4.2\\\"},"
+        "\\\"npm\\\":{},\\\"routes\\\":[\\\"/\\\"]}. "
+        "Never add name, version, description, main, scripts, dependencies, devDependencies, "
+        "repository, keywords, author, license, or other package.json fields. "
+        "Use exact numeric dependency versions; export app from app.py and put tests in tests/. "
+        "Use project.dependencies to request operator approval, project.build/project.test "
+        "for isolated execution, and browser.screenshot for route QA. Python manifests must "
+        "declare the complete exact dependency closure because installation is offline and "
+        "does not resolve undeclared transitive packages. If project.dependencies fails, use "
+        "its returned diagnostic to repair project.json or report a genuine infrastructure "
+        "blocker. Never use system.request_privileged_action to install or repair project "
+        "dependencies. Never use tests.run for generated Flask code. No shell commands or "
+        "executable selection are available. "
         "Use relative paths and . for the workspace root, never /. "
         "After the LAST write to each changed file, read all its pages back. "
         "Reserve time for required verification and a finish decision. "
