@@ -84,10 +84,6 @@ def web(
     )
 
 
-@pytest.mark.parametrize(
-    "operation",
-    ["web.search", "web.fetch", "docs.fetch", "assets.search_images", "assets.import_image"],
-)
 async def test_search_connect_error_is_contained(
     workspace: Workspace,
     privacy: PrivacyFilter,
@@ -112,6 +108,10 @@ async def test_search_connect_error_is_contained(
     assert "connection failed" not in result["error"]
 
 
+@pytest.mark.parametrize(
+    "operation",
+    ["web.search", "web.fetch", "docs.fetch", "assets.search_images", "assets.import_image"],
+)
 async def test_kill_switch_denies_every_web_tool(runtime: Runtime, operation: Any) -> None:
     runtime.settings.internet_access_enabled = False
     result = await runtime.web.execute(
