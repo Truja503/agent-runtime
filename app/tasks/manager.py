@@ -53,6 +53,8 @@ class TaskManager:
         task = await self.get(task_id)
         if task.status is target:
             return task
+        if target == TaskStatus.COMPLETED:
+            self.check_completion(task.result or {})
         if not can_transition(task.status, target):
             raise InvalidTaskTransitionError(
                 f"cannot move task {task_id} from {task.status} to {target}"
@@ -74,6 +76,7 @@ class TaskManager:
 
     async def complete(self, task_id: str, result: dict[str, Any]) -> Task:
         task = await self.get(task_id)
+        self.check_completion(result)
         if not can_transition(task.status, TaskStatus.COMPLETED):
             raise InvalidTaskTransitionError(f"cannot complete task {task_id} from {task.status}")
         task.status = TaskStatus.COMPLETED
@@ -82,6 +85,42 @@ class TaskManager:
         await self._store.update(task)
         await self._events.emit(
             EventType.TASK_COMPLETED, task_id=task_id, actor="task_manager", result=result
+        )
+        return task
+
+    @staticmethod
+    def check_completion(result: dict[str, Any]) -> None:
+        if (
+            result.get("acceptance", {}).get("status") in {"rejected", "stalled"}
+            or result.get("acceptance", {}).get("failures")
+            or result.get("pending_approvals")
+            or (
+                result.get("phase_execution")
+                and result.get("acceptance", {}).get("status") != "accepted"
+            )
+            or any(
+                p["status"] != "passed" or p.get("pending_approvals")
+                for p in result.get("phase_execution", {}).get("phases", [])
+            )
+        ):
+            raise InvalidTaskTransitionError(
+                "cannot complete task with unmet evidence or approvals"
+            )
+
+    async def resume_failed_phase(self, task_id: str) -> Task:
+        task = await self.get(task_id)
+        if task.status != TaskStatus.FAILED or not (task.result or {}).get("phase_execution"):
+            raise InvalidTaskTransitionError("only persisted phased failures are recoverable")
+        task.status, task.error = TaskStatus.CREATED, None
+        task.updated_at = datetime.now(UTC)
+        await self._store.update(task)
+        await self._events.emit(
+            EventType.TASK_STATUS_CHANGED,
+            task_id=task_id,
+            actor="task_manager",
+            previous="failed",
+            current="created",
+            reason="operator phase resume",
         )
         return task
 
@@ -134,10 +173,28 @@ class TaskManager:
                 task.status = (
                     TaskStatus.PAUSED
                     if task.options.recoverable_execution
+                    or (task.result or {}).get("phase_execution")
                     else TaskStatus.INTERRUPTED
                 )
                 task.error = "Runtime restarted before task completion."
                 task.updated_at = datetime.now(UTC)
+                execution = (task.result or {}).get("phase_execution")
+                if execution:
+                    execution["status"] = "paused"
+                    phase = execution["phases"][execution["current_phase_index"]]
+                    if phase["status"] != "passed":
+                        phase.update(status="paused", stop_reason="runtime_restart")
+                    plan = execution["plan"]["phases"][execution["current_phase_index"]]
+                    await self._events.emit(
+                        EventType.PHASE_PAUSED,
+                        task_id=task.id,
+                        actor="task_manager",
+                        phase_id=plan["id"],
+                        phase_title=plan["title"],
+                        phase_index=execution["current_phase_index"] + 1,
+                        phase_attempt=phase["attempt"],
+                        reason="runtime_restart",
+                    )
                 await self._store.update(task)
                 await self._events.emit(
                     EventType.TASK_INTERRUPTED,
@@ -149,7 +206,12 @@ class TaskManager:
                 )
                 count += 1
         for task in await self.waiting_tasks():
-            if task.options.recoverable_execution:
+            if task.options.recoverable_execution or (task.result or {}).get("phase_execution"):
+                execution = (task.result or {}).get("phase_execution")
+                if execution:
+                    execution["status"] = "paused"
+                    execution["phases"][execution["current_phase_index"]]["status"] = "paused"
+                    await self._store.update(task)
                 await self.transition(task.id, TaskStatus.PAUSED)
                 count += 1
         return count

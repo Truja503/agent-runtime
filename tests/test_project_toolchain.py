@@ -94,6 +94,53 @@ async def test_unknown_requires_explicit_additional_approval(
     assert calls == ["download", "dependencies"]
 
 
+async def test_identical_failed_manifest_needs_operator_infrastructure_retry(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = project(runtime)
+    calls = fake_install(runtime, monkeypatch)
+    ready = runtime.projects.executor.readiness
+
+    async def unavailable() -> dict[str, Any]:
+        return {"status": "NOT READY", "reason": "Docker unavailable"}
+
+    monkeypatch.setattr(runtime.projects.executor, "readiness", unavailable)
+    request = await runtime.projects.dependencies(args)
+    failed = await runtime.projects.decide(request["request_id"], "operator", True)
+    assert failed["status"] == "failed" and failed["retryable_infrastructure"]
+    repeated = await runtime.projects.dependencies(args)
+    assert repeated["request_id"] == request["request_id"]
+    assert "DEPENDENCY_RETRY_NOT_PROGRESS" in repeated["reason"]
+    assert not calls
+    with pytest.raises(ToolExecutionError, match="not pending"):
+        await runtime.projects.decide(request["request_id"], "operator", True)
+    monkeypatch.setattr(runtime.projects.executor, "readiness", ready)
+    completed = await runtime.projects.decide(
+        request["request_id"], "operator", True, retry_infrastructure=True
+    )
+    assert completed["status"] == "executed"
+    assert calls == ["download", "dependencies"]
+
+
+async def test_package_failure_cannot_use_infrastructure_retry(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = project(runtime)
+    fake_install(runtime, monkeypatch)
+
+    async def failed_download(*args: Any) -> list[Any]:
+        raise ToolExecutionError("pinned package version missing")
+
+    monkeypatch.setattr("app.tools.project.download_manifest", failed_download)
+    request = await runtime.projects.dependencies(args)
+    failed = await runtime.projects.decide(request["request_id"], "operator", True)
+    assert failed["status"] == "failed" and not failed["retryable_infrastructure"]
+    with pytest.raises(ToolExecutionError, match="not a retryable"):
+        await runtime.projects.decide(
+            request["request_id"], "operator", True, retry_infrastructure=True
+        )
+
+
 async def test_package_json_style_manifest_reports_actionable_error(runtime: Runtime) -> None:
     root = runtime.settings.workspace_root / "wrong-manifest"
     root.mkdir()
@@ -236,6 +283,9 @@ async def test_install_cancellation_clears_pending(
     ticket = await runtime.projects.ticket(request["request_id"])
     assert ticket and ticket.status == "failed"
     assert not runtime.projects.installing
+    again = await runtime.projects.dependencies(args)
+    assert again["status"] == "failed" and again["request_id"] == request["request_id"]
+    assert "DEPENDENCY_RETRY_NOT_PROGRESS" in again["reason"]
 
 
 async def test_cancel_before_container_creation_still_removes_it(

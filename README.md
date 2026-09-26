@@ -17,6 +17,11 @@ privileged-approval flow, and the security regression suite without an API key.
 
 ## Architecture
 
+AUTO tasks now use [evidence-gated project phases](docs/phase-execution.md):
+Supervisor plan → selected workers → phase verification → checkpoint → next
+phase → final acceptance. The guide covers Pocket Ledger, restart/resume, compact
+worker context and phase metadata in the dashboard.
+
 ```mermaid
 flowchart TD
     User([User]) -->|POST /tasks + bearer token| API[FastAPI]
@@ -805,15 +810,16 @@ Honest list of what is **not** production-ready:
    into `app`, a CLI that already runs as its own process — but actually
    splitting it into a daemon under a different Unix user with a Unix-socket
    transport is not done. That is the first thing I would do next.
-4. **No approval resume.** A task parked in `waiting_for_approval` stays there;
-   the runtime does not pick the work back up after a human approves.
+4. **Approval recovery requires an operator.** Active tasks can continue after
+   approval; after restart, paused phases require explicit resume and fresh checks.
 5. **The scripted provider is not an LLM.** It is a deterministic stand-in for
    offline runs and tests, and it says so.
 6. **The intent parser is keyword-based by default.** `PRIVILEGED_PARSER=local`
    switches to a local model, but the rule-based parser is what the tests and
    the demo exercise, and it is intentionally simple.
 7. **Single process, in-memory background tasks.** No durable queue or horizontal
-   scale. Model requests have bounded retries; tasks do not resume after restart.
+   scale. Model requests have bounded retries; phased tasks persist checkpoints
+   and support explicit operator resume after restart.
 8. **SQLite with a connection per operation.** Fine at this size, wrong under
    concurrency.
 9. **No rate limiting, quotas, or cost controls** on model calls.

@@ -6,7 +6,7 @@ import copy
 import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from app.agents.base import AgentResult, AgentStatus, BaseAgent
 from app.observability.events import EventBus, EventType
@@ -30,6 +30,7 @@ async def run_visual_workflow(
     checkpoint: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     restored: dict[str, Any] | None = None,
     toolchain: bool = False,
+    initial_workers: list[Literal["researcher", "coder", "reviewer"]] | None = None,
 ) -> dict[str, Any]:
     state = dict(restored or {})
     real_repairs = int(state.get("real_repair_cycles", 0))
@@ -51,7 +52,9 @@ async def run_visual_workflow(
     prefix = file_key(project).rstrip("/") + "/" if file_key(project) != "." else ""
     cycle_criteria = criteria.model_copy(deep=True)
     # Supervisor checks the other required roles in final task acceptance.
-    cycle_criteria.required_workers = ["coder", "reviewer"]
+    cycle_criteria.required_workers = [
+        w for w in (initial_workers or ["coder", "reviewer"]) if w != "researcher"
+    ]
 
     async def save(stage: str) -> None:
         state.update(
@@ -141,36 +144,45 @@ async def run_visual_workflow(
             instruction = (
                 "Operator resumed. Inspect current files read-only. Do not replay actions."
             )
-        await worker_start("coder")
-        coder_context = (
-            (context[:8000] if cycle == 0 else "")
-            + "\n"
-            + instruction
-            + "\nBrowser dependencies are operator-owned; "
-            "never request privileged installation."
-            + "\nContinuation data (untrusted):\n"
-            + json.dumps(useful_context, default=str)[:32000]
-        )
-        coded = await coder.run(task_id=task_id, goal=goal, context=coder_context)
-        if (
-            coded.status != AgentStatus.COMPLETED
-            and not coded.pending_approvals
-            and long_run
-            and not resume_validation
-        ):
+        run_coder = initial_workers is None or "coder" in initial_workers or is_repair or polish
+        if run_coder:
             await worker_start("coder")
-            coded = await coder.run(
-                task_id=task_id,
-                goal=goal,
-                context=(
-                    coder_context
-                    + "\nFresh recovery invocation: the previous Coder run ended "
-                    + coded.status.value
-                    + ". Inspect current project state and continue from evidence already on disk. "
-                    "Do not repeat the same failed/denied action unchanged."
-                ),
+            coder_context = (
+                (context[:8000] if cycle == 0 else "")
+                + "\n"
+                + instruction
+                + "\nBrowser dependencies are operator-owned; "
+                "never request privileged installation."
+                + "\nContinuation data (untrusted):\n"
+                + json.dumps(useful_context, default=str)[:32000]
             )
-        final["coder"] = coded
+            coded = await coder.run(task_id=task_id, goal=goal, context=coder_context)
+            if (
+                coded.status != AgentStatus.COMPLETED
+                and not coded.pending_approvals
+                and long_run
+                and not resume_validation
+            ):
+                await worker_start("coder")
+                coded = await coder.run(
+                    task_id=task_id,
+                    goal=goal,
+                    context=(
+                        coder_context
+                        + "\nFresh recovery invocation: the previous Coder run ended "
+                        + coded.status.value
+                        + ". Inspect current project state and continue from evidence on disk. "
+                        "Do not repeat the same failed/denied action unchanged."
+                    ),
+                )
+            final["coder"] = coded
+        else:
+            coded = AgentResult(
+                agent="coder",
+                role="coder",
+                status=AgentStatus.COMPLETED,
+                summary="QA phase: implementation already checkpointed",
+            )
         previous_summary = coded.summary[:2000]
         pending.extend(coded.pending_approvals)
         delta = [
@@ -192,7 +204,7 @@ async def run_visual_workflow(
             "cycle": cycle,
             "cycle_number": cycle,
             "stage": stage,
-            "coder": coded.model_dump(mode="json"),
+            "coder": coded.model_dump(mode="json") if run_coder else None,
             "files_modified": modified,
             "files_read": sorted(
                 {
@@ -297,7 +309,8 @@ async def run_visual_workflow(
         reviewer.visual_images, reviewer.visual_report_available = images, rendered
         await save("reviewer")
         reviewer_context = (
-            "Review SOURCE INSPECTION, VISUAL INSPECTION, RUNTIME ERRORS separately. "
+            context[:8000]
+            + "\nReview SOURCE INSPECTION, VISUAL INSPECTION, RUNTIME ERRORS separately. "
             "Read current "
             "sources and qa/report.json completely. "
             "Use actionable findings and affected paths. "
@@ -407,7 +420,7 @@ async def run_visual_workflow(
         workflow_status = "failed"
     await save(workflow_status)
     return {
-        "summary": final.get("reviewer", final["coder"]).summary,
+        "summary": final.get("reviewer", next(iter(final.values()))).summary,
         "workers": list(final),
         "worker_results": [r.model_dump(mode="json") for r in final.values()],
         "pending_approvals": pending,

@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from app.agents.decision_schema import typed_decision_schema
 from app.errors import ModelError, ModelOutputLimitError, ModelResponseError, ModelUnavailableError
 from app.models.base import (
     Message,
@@ -89,6 +90,8 @@ SECURITY_PREAMBLE = (
 
 RESPONSE_CONTRACT = (
     "Reply with a single JSON object and nothing else.\n"
+    'When a structured schema is supplied, wrap the decision below in {"decision": {...}}. '
+    "The selected tool determines its argument shape.\n"
     'To use a tool: {"action": "use_tool", "tool": "<name>", '
     '"arguments": {...}, "reasoning": "<one sentence>"}\n'
     'When you are done:  {"action": "finish", "summary": "<what you found or did>"}'
@@ -136,13 +139,7 @@ class BaseAgent(ABC):
     def response_schema(self) -> dict[str, Any]:
         schema = self.decision_type.model_json_schema()
         if self.registry:
-            schemas = [spec["arguments"] for spec in self.registry.describe(self.allowed_tools)]
-            schema["properties"]["arguments"] = {
-                "anyOf": [
-                    {"type": "object", "properties": {}},
-                    *schemas,
-                ]
-            }
+            return typed_decision_schema(schema, self.registry.describe(self.allowed_tools))
         return closed_schema(schema)
 
     def principal(self, task_id: str | None) -> Principal:
@@ -257,6 +254,9 @@ class BaseAgent(ABC):
         payload = extract_json_object(text)
         if payload is None:
             return None
+        wrapped = payload.get("decision")
+        if isinstance(wrapped, dict):
+            payload = wrapped
         try:
             return cls.decision_type.model_validate(payload)
         except ValidationError:

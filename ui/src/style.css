@@ -481,6 +481,16 @@ code {
   color: #95a6bc;
   margin-left: 12px;
 }
+.phase-badge {
+  display: block;
+  color: #acc9ff;
+  overflow-wrap: anywhere;
+  margin-bottom: 4px;
+}
+.phase-plan { padding-left: 24px; }
+.phase-plan > li { margin: 10px 0; }
+.phase-execution dl { display: grid; grid-template-columns: minmax(130px, 1fr) 2fr; gap: 6px; }
+.phase-execution dd { margin: 0; overflow-wrap: anywhere; }
 .settings-grid {
   display: grid;
   grid-template-columns: 290px 1fr;

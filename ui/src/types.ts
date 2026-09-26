@@ -99,6 +99,20 @@ export interface Workflow {
     previews?: {dom_loaded?: boolean; console_errors?: unknown[]; failed_resources?: unknown[]; horizontal_overflow?: boolean}[] };
   stop_reason?: string;
 }
+export interface PhasePlan {
+  id: string; title: string; goal: string; workers: string[]; depends_on: string[];
+  requirements: Record<string, unknown>; verification: string[]; workflow: string;
+}
+export interface PhaseState {
+  id: string; status: string; attempt: number; active_worker: string | null;
+  outstanding: string[]; files_changed: string[]; last_meaningful_progress: string | null;
+  pending_approvals: string[]; stop_reason: string | null;
+  evidence: { verified_files?: string[]; readback?: string[]; verification?: Record<string, string> };
+}
+export interface PhaseExecution {
+  plan: {summary: string; phases: PhasePlan[]}; current_phase_index: number;
+  status: string; phases: PhaseState[];
+}
 export interface Event {
   id: string;
   type: string;

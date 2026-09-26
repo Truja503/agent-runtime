@@ -29,9 +29,9 @@ from app.policy.engine import PolicyEngine
 from app.privileged_bridge import InProcessPrivilegedGateway, PrivilegedGateway
 from app.tasks.evidence import evaluate_acceptance, execution_evidence, file_key
 from app.tasks.manager import TaskManager
+from app.tasks.phase_workflow import PhaseOrchestrator
 from app.tasks.state import TERMINAL_STATUSES, TaskStatus, TaskStore
 from app.tasks.store import SQLiteTaskStore
-from app.tasks.visual import run_visual_workflow
 from app.tools.broker import InvocationStatus, ToolBroker, ToolResult
 from app.tools.browser import BrowserTools
 from app.tools.builtin import build_registry, register_project_tools
@@ -152,10 +152,7 @@ class Runtime:
                 detail = ticket.reason if ticket else None
                 if not detail and isinstance(output, dict):
                     detail = str(
-                        output.get("output")
-                        or output.get("reason")
-                        or output.get("error")
-                        or ""
+                        output.get("output") or output.get("reason") or output.get("error") or ""
                     )[-4000:]
                 reason = "approval_failed" + (f": {detail}" if detail else "")
             else:
@@ -351,47 +348,17 @@ class Runtime:
                 )
             await self.tasks.transition(task_id, TaskStatus.PLANNING)
 
-            async def checkpoint(state: dict[str, Any]) -> None:
-                current = await self.tasks.get(task_id)
-                state = {**state, "worker_steps_mode": task.options.worker_steps_mode}
-                await self.tasks.record_result(
-                    task_id,
-                    {
-                        **(current.result or {}),
-                        "workflow": self.inspection.privacy.clean(state),
-                    },
-                )
-
-            async def visual_flow(context: str) -> dict[str, Any]:
-                assert task.options.visual_project
-                return await run_visual_workflow(
-                    task_id=task_id,
-                    goal=execution_goal,
-                    project=task.options.visual_project,
-                    max_repairs=task.options.max_repair_cycles,
+            if task.options.agent in {"auto", "supervisor"}:
+                outcome = await PhaseOrchestrator(
+                    task=task,
+                    supervisor=supervisor,
                     workers=workers,
                     broker=self.broker,
-                    worker_start=worker_start,
                     events=self.events,
-                    criteria=task.options.acceptance,
-                    context=context,
-                    long_run=task.options.long_run_quality,
-                    toolchain=task.options.project_framework == "flask",
-                    checkpoint=checkpoint,
-                    restored=(task.result or {}).get("workflow")
-                    if (task.result or {}).get("resume_requested")
-                    else None,
-                )
-
-            if task.options.agent in {"auto", "supervisor"}:
-                outcome = await supervisor.run_task(
-                    task_id=task_id,
-                    goal=execution_goal,
-                    implementation=visual_flow if task.options.visual_project else None,
-                    research_required=task.options.research_required,
-                    web_research_required=task.options.web_research_required,
-                    allow_degraded_research=task.options.allow_degraded_research,
-                )
+                    tasks=self.tasks,
+                    workspace=Workspace(self.settings.workspace_root),
+                    worker_start=worker_start,
+                ).run()
             else:
                 await worker_start(task.options.agent)
                 worker = workers[task.options.agent]
@@ -404,20 +371,35 @@ class Runtime:
                 }
             outcome = self.inspection.privacy.clean(outcome)
             saved = (await self.tasks.get(task_id)).result or {}
-            for key in ("approvals", "approval_history", "workflow"):
+            for key in (
+                "approvals",
+                "approval_history",
+                "workflow",
+                "phase_execution",
+                "project_plan",
+            ):
                 if key in saved:
                     outcome.setdefault(key, saved[key])
             if "workflow" in outcome:
                 outcome["workflow"]["worker_steps_mode"] = task.options.worker_steps_mode
             outcome["evidence"] = execution_evidence(await self.tasks.events_for(task_id))
+            final_criteria = task.options.acceptance.model_copy(deep=True)
+            if outcome.get("phase_execution"):
+                final_criteria.required_workers = list(
+                    dict.fromkeys([*final_criteria.required_workers, *outcome["workers"]])
+                )
             outcome["acceptance"] = evaluate_acceptance(
-                task.options.acceptance,
+                final_criteria,
                 outcome["evidence"],
                 outcome["worker_results"],
                 outcome.get("visual_qa"),
             )
             outcome["acceptance_failures"] = outcome["acceptance"]["failures"]
             outcome["acceptance_failures"].extend(outcome.get("routing_failures", []))
+            if outcome.get("phase_execution") and any(
+                p["status"] != "passed" for p in outcome["phase_execution"]["phases"]
+            ):
+                outcome["acceptance_failures"].append("not all required phases passed")
             if outcome["acceptance_failures"]:
                 outcome["acceptance"]["status"] = "rejected"
             if outcome.get("workflow_status") == "stalled" or any(
@@ -441,6 +423,13 @@ class Runtime:
         if outcome.get("workflow_status") == "stalled" or any(
             r["status"] == "stalled" for r in outcome["worker_results"]
         ):
+            if outcome.get("phase_execution"):
+                await self.events.emit(
+                    EventType.AGENT_FAILED,
+                    task_id=task_id,
+                    actor="supervisor",
+                    reason="phase execution stalled",
+                )
             await self.tasks.transition(task_id, TaskStatus.STALLED)
             return
 
@@ -463,10 +452,25 @@ class Runtime:
             or outcome["acceptance_failures"]
             or any(r["status"] != "completed" for r in outcome["worker_results"])
         ):
+            if outcome.get("phase_execution"):
+                await self.events.emit(
+                    EventType.AGENT_FAILED,
+                    task_id=task_id,
+                    actor="supervisor",
+                    reason="phase or final acceptance failed",
+                )
             await self.tasks.fail(task_id, "worker or acceptance criteria failed; see task detail")
             return
         await self.tasks.transition(task_id, TaskStatus.REVIEWING)
         await self.tasks.complete(task_id, outcome)
+        if outcome.get("phase_execution"):
+            await self.events.emit(
+                EventType.AGENT_COMPLETED,
+                task_id=task_id,
+                actor="supervisor",
+                status="completed",
+                phase_count=len(outcome["phase_execution"]["phases"]),
+            )
 
     async def aclose(self) -> None:
         await self.projects.stop_task(None)

@@ -3,6 +3,8 @@ import { computed, ref } from "vue";
 import { api, pretty, terminal, taskTitle } from "../api";
 import type { Acceptance, Review, Evidence, Event, Task, Workflow } from "../types";
 import ProjectToolchain from "./ProjectToolchain.vue";
+import PhaseExecutionPanel from "./PhaseExecution.vue";
+import type { PhaseExecution } from "../types";
 const props = defineProps<{
   task: Task;
   events: Event[];
@@ -12,6 +14,7 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ cancel: []; resume: [] }>();
 const workflow = computed(() => props.task.result?.workflow as Workflow | undefined);
+const phases = computed(() => props.task.result?.phase_execution as PhaseExecution | undefined);
 const toolchainProject = computed(() => {
   if (props.task.options.visual_project) return props.task.options.visual_project;
   const request = [...props.events].reverse().find(
@@ -122,6 +125,8 @@ async function loadPrompts() {
       }}</span>
     </div>
     <details><summary>Task instructions</summary><pre>{{ task.goal }}</pre></details>
+    <PhaseExecutionPanel v-if="phases" :execution="phases" :task-status="task.status" />
+    <button v-if="phases && task.status === 'failed'" :disabled="!editable" @click="emit('resume')">Resume failed phase with fresh validation</button>
     <ProjectToolchain v-if="toolchainProject" :project="toolchainProject" :editable="editable" :checkpoint="task.status + ':' + workflow?.stage" />
     <div v-if="workflow" class="notice">
       <strong v-if="task.options.long_run_quality">LONG-RUN · </strong>
@@ -315,7 +320,7 @@ async function loadPrompts() {
     <div class="events">
       <div v-for="event in events" :key="event.id" class="event">
         <time>{{ new Date(event.timestamp).toLocaleTimeString() }}</time
-        ><span>{{ event.actor || "runtime" }}</span>
+        ><span><strong v-if="event.payload.phase_id" class="phase-badge">[P{{ event.payload.phase_index }} {{ event.payload.phase_title }} · attempt {{ event.payload.phase_attempt }}]</strong> {{ event.actor || "runtime" }}</span>
         <details>
           <summary
             :class="{
