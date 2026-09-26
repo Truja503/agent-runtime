@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from app.errors import ToolExecutionError
+from app.observability.context import CURRENT_PHASE
 from app.privileged_bridge import PrivilegedTicket
 from app.storage import apply_schema, connect
 from app.tools.broker import CURRENT_TOOL_TASK
@@ -104,6 +105,18 @@ class ProjectToolchain:
             return {"status": "completed", "project": args.project, "environment": "READY"}
         request_id = state.get("request_id", "")
         request = self.get(request_id)
+        phase = CURRENT_PHASE.get()
+        if request.get("digest") == digest and request.get("status") == "failed":
+            return {
+                **request,
+                "status": "failed",
+                "reason": "DEPENDENCY_RETRY_NOT_PROGRESS: exact manifest previously failed. "
+                "Change the relevant manifest or ask the operator to retry a confirmed "
+                "infrastructure failure. "
+                + str(request.get("reason") or request.get("result", {}).get("output") or "")[
+                    -3000:
+                ],
+            }
         if request.get("digest") != digest or request.get("status") != "awaiting_approval":
             request_id = "dep-" + uuid.uuid4().hex
             request = {
@@ -112,6 +125,7 @@ class ProjectToolchain:
                 "project": args.project,
                 "digest": digest,
                 "task_id": CURRENT_TOOL_TASK.get(),
+                "phase": phase.metadata() if phase else None,
                 "manifest": manifest.model_dump(),
                 "additional_python": sorted(set(manifest.python) - PYTHON_PACKAGES),
                 "additional_npm": sorted(set(manifest.npm) - NPM_PACKAGES),
@@ -132,10 +146,19 @@ class ProjectToolchain:
         )
 
     async def decide(
-        self, request_id: str, operator: str, approve: bool, allow_additional: bool = False
+        self,
+        request_id: str,
+        operator: str,
+        approve: bool,
+        allow_additional: bool = False,
+        retry_infrastructure: bool = False,
     ) -> dict[str, Any]:
         async with self.lock:
             request = self.get(request_id)
+            if retry_infrastructure and approve and request.get("status") == "failed":
+                if not request.get("retryable_infrastructure"):
+                    raise ToolExecutionError("failure is not a retryable infrastructure condition")
+                request["status"] = "awaiting_approval"
             if request.get("status") != "awaiting_approval":
                 raise ToolExecutionError("dependency request is not pending")
             if not approve:
@@ -150,13 +173,14 @@ class ProjectToolchain:
             current = asyncio.current_task()
             assert current
             self.installing[request_id] = current
-            request.update(approved_by=operator, installing=True)
+            request.update(approved_by=operator, installing=True, retryable_infrastructure=False)
             self.put(request_id, request)
             key = "project:" + str(root)
             self.put(key, {**self.get(key), "installed": None})
             try:
                 readiness = await self.executor.readiness()
                 if readiness["status"] != "READY":
+                    request["retryable_infrastructure"] = True
                     raise ToolExecutionError(str(readiness["reason"]))
                 with tempfile.TemporaryDirectory(prefix="ar-dependencies-") as directory:
                     target = Path(directory)
@@ -178,6 +202,8 @@ class ProjectToolchain:
                 request.update(status="failed", reason="dependency installation cancelled")
                 raise
             except Exception as exc:
+                if isinstance(exc, TimeoutError):
+                    request["retryable_infrastructure"] = True
                 request.update(status="failed", reason=f"{type(exc).__name__}: {exc}"[:2000])
             finally:
                 request["installing"] = False

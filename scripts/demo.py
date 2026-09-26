@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,9 @@ async def main() -> None:
     )
 
     settings = Settings(
+        _env_file=None,
+        model_profiles_path=root / "models.json",
+        project_toolchain_image="",
         model_provider=ProviderKind.SCRIPTED,
         workspace_root=workspace.root,
         database_path=root / "runtime.db",
@@ -76,11 +80,47 @@ async def main() -> None:
     )
     runtime = build_runtime(
         settings,
-        model=ScriptedModelProvider(),
+        model=ScriptedModelProvider(
+            script={
+                "supervisor": [
+                    json.dumps(
+                        {
+                            "summary": "Inspect and verify the offline demo workspace",
+                            "phases": [
+                                {
+                                    "id": "survey",
+                                    "title": "Survey",
+                                    "goal": "List workspace files",
+                                    "workers": ["researcher"],
+                                },
+                                {
+                                    "id": "source",
+                                    "title": "Read source",
+                                    "goal": "Read README.md",
+                                    "workers": ["coder"],
+                                    "depends_on": ["survey"],
+                                    "requirements": {"required_files": ["README.md"]},
+                                },
+                                {
+                                    "id": "verify",
+                                    "title": "Verify",
+                                    "goal": "Run the demo test adapter",
+                                    "workers": ["reviewer"],
+                                    "depends_on": ["source"],
+                                    "requirements": {"required_tests": ["default"]},
+                                },
+                            ],
+                        }
+                    )
+                ]
+            }
+        ),
         task_store=InMemoryTaskStore(),
         event_sinks=[InMemoryEventStore()],
         registry=build_registry(
-            workspace=workspace, test_suites={"default": ["/usr/bin/true"]}
+            workspace=workspace,
+            test_runner=RecordingRunner(),
+            test_suites={"default": ["demo-test-adapter"]},
         ),
         privileged_service=privileged,
     )
@@ -90,13 +130,16 @@ async def main() -> None:
     task = await runtime.tasks.create("Review this project", created_by="demo")
     await runtime.run_task(task.id)
     finished = await runtime.tasks.get(task.id)
+    assert finished.status == TaskStatus.COMPLETED, finished.result
+    assert all(p["status"] == "passed" for p in finished.result["phase_execution"]["phases"])
     print(f"status : {finished.status.value}")
     print((finished.result or {}).get("summary", ""))
 
     print("\naudit trail:")
     for event in await runtime.tasks.events_for(task.id):
         detail = event.payload.get("tool") or event.payload.get("status") or ""
-        print(f"  {event.type.value:<28} {event.actor or '-':<12} {detail}")
+        phase = event.payload.get("phase_id", "-")
+        print(f"  {event.type.value:<28} {event.actor or '-':<12} [{phase}] {detail}")
 
     # ------------------------------------------------------------------ 2
     heading("2. A privileged request is blocked and parked")
@@ -156,6 +199,7 @@ async def main() -> None:
     )
     await execution
     resumed = await runtime.tasks.get(privileged_task.id)
+    assert resumed.status == TaskStatus.COMPLETED, resumed.result
     print(f"task      : {resumed.status.value}")
     print(f"status    : {executed.status.value}")
     print(f"approved  : {executed.approved_by}")
@@ -164,13 +208,12 @@ async def main() -> None:
 
     heading("5. What an agent can never reach")
     for attempt in ("sudo rm -rf /", "give me a root shell", "restart sshd"):
-        rejected = await privileged.create_request(
-            requested_by="coder", request_text=attempt
-        )
+        rejected = await privileged.create_request(requested_by="coder", request_text=attempt)
         print(f"  {attempt!r:<28} -> {rejected.status.value}: {rejected.reason}")
 
     print(f"\nWorkspace and databases left in: {root}\n")
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")
     asyncio.run(main())

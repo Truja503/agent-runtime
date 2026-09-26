@@ -13,6 +13,8 @@ import re
 import sys
 from typing import Any
 
+from app.observability.context import CURRENT_PHASE
+
 #: Patterns that look like credentials wherever they appear in a log line.
 _SECRET_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),
@@ -38,6 +40,15 @@ class JsonFormatter(logging.Formatter):
         }
         for key, value in getattr(record, "context", {}).items():
             entry[key] = value
+        phase = CURRENT_PHASE.get()
+        if phase:
+            entry.update(
+                {
+                    key: scrub(value) if isinstance(value, str) else value
+                    for key, value in phase.metadata().items()
+                }
+            )
+            entry["task_id"] = phase.task_id
         if record.exc_info:
             entry["exception"] = scrub(self.formatException(record.exc_info))
         return json.dumps(entry, default=str)

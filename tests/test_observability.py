@@ -78,4 +78,15 @@ async def test_prompts_are_never_stored_verbatim(runtime: object) -> None:
     for event in model_events:
         assert "prompt" not in event.payload
         assert "messages" not in event.payload
-        assert set(event.payload) <= {"provider", "model", "step", "prompt_chars", "prompt_hash"}
+        assert set(event.payload) <= {
+            "provider",
+            "model",
+            "step",
+            "prompt_chars",
+            "prompt_hash",
+            "phase_id",
+            "phase_index",
+            "phase_title",
+            "phase_attempt",
+            "phase_count",
+        }

@@ -18,6 +18,8 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from app.observability.context import CURRENT_PHASE
+
 #: Substrings that mark a value as unloggable. Matched case-insensitively
 #: against payload keys.
 _SENSITIVE_KEY_MARKERS = (
@@ -45,6 +47,17 @@ class EventType(StrEnum):
     TASK_INTERRUPTED = "task_interrupted"
     TASK_STATUS_CHANGED = "task_status_changed"
     WORKFLOW_CYCLE = "workflow_cycle"
+    PHASE_PLANNED = "phase_planned"
+    PHASE_STARTED = "phase_started"
+    PHASE_WORKER_STARTED = "phase_worker_started"
+    PHASE_VERIFICATION_STARTED = "phase_verification_started"
+    PHASE_COMPLETION_REJECTED = "phase_completion_rejected"
+    PHASE_REPAIR_STARTED = "phase_repair_started"
+    PHASE_PASSED = "phase_passed"
+    PHASE_FAILED = "phase_failed"
+    PHASE_STALLED = "phase_stalled"
+    PHASE_PAUSED = "phase_paused"
+    PHASE_RESUMED = "phase_resumed"
 
     AGENT_STARTED = "agent_started"
     AGENT_COMPLETED = "agent_completed"
@@ -125,6 +138,20 @@ class EventBus:
         actor: str | None = None,
         **payload: Any,
     ) -> Event:
+        phase = CURRENT_PHASE.get()
+        if phase and phase.task_id == task_id:
+            payload.update(phase.metadata())
+        elif task_id and payload.get("request_id"):
+            # Operator approval happens in a different request/context, possibly
+            # after restart. Recover its association from the durable request event.
+            for previous in reversed(await self.list_for_task(task_id)):
+                if previous.payload.get("request_id") == payload[
+                    "request_id"
+                ] and previous.payload.get("phase_id"):
+                    payload.update(
+                        {k: v for k, v in previous.payload.items() if k.startswith("phase_")}
+                    )
+                    break
         event = Event(
             type=event_type,
             task_id=task_id,
@@ -133,6 +160,8 @@ class EventBus:
         )
         for sink in self._sinks:
             await sink.append(event)
+        if phase and phase.task_id == task_id and phase.observe:
+            await phase.observe(event)
         return event
 
     async def list_for_task(self, task_id: str) -> list[Event]:

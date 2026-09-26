@@ -35,6 +35,7 @@ class DependencyDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     approve: bool
     allow_additional_packages: bool = False
+    retry_infrastructure: bool = False
 
 
 @router.post("/project-toolchain/inspect")
@@ -60,7 +61,11 @@ async def dependency_decide(
     _authenticate(rt, credentials)
     try:
         result = await rt.projects.decide(
-            request_id, credentials.operator_id, body.approve, body.allow_additional_packages
+            request_id,
+            credentials.operator_id,
+            body.approve,
+            body.allow_additional_packages,
+            body.retry_infrastructure,
         )
         await rt.events.emit(
             EventType.PRIVILEGED_ACTION_APPROVED

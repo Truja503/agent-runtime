@@ -61,6 +61,9 @@ def workspace(tmp_path: Path) -> Workspace:
 @pytest.fixture
 def settings(tmp_path: Path, workspace: Workspace) -> Settings:
     return Settings(
+        _env_file=None,
+        model_profiles_path=tmp_path / "models.json",
+        project_toolchain_image="",
         model_provider=ProviderKind.SCRIPTED,
         workspace_root=workspace.root,
         database_path=tmp_path / "runtime.db",

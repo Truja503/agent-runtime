@@ -135,7 +135,11 @@ def execution_evidence(events: list[Event]) -> dict[str, Any]:
             if actor == "reviewer":
                 state["reviewer_inspected_complete"] = True
     files = [{k: v for k, v in state.items() if k != "coverage"} for state in states.values()]
-    tests = [c["result"] for c in calls if c["tool"] == "tests.run"]
+    tests = [
+        {"suite": "project", **c["result"]} if c["tool"] == "project.test" else c["result"]
+        for c in calls
+        if c["tool"] in {"tests.run", "project.test"}
+    ]
     return {
         "tool_calls": calls,
         "files_modified": sorted(f["path"] for f in files if f["last_write_event_id"]),
@@ -145,7 +149,18 @@ def execution_evidence(events: list[Event]) -> dict[str, Any]:
             f["path"] for f in files if f["reviewer_inspected_complete"]
         ),
         "tests_executed": tests,
-        "verification_actions": [c for c in calls if c["tool"] in {"filesystem.read", "tests.run"}],
+        "verification_actions": [
+            c
+            for c in calls
+            if c["tool"]
+            in {
+                "filesystem.read",
+                "tests.run",
+                "project.test",
+                "project.build",
+                "browser.screenshot",
+            }
+        ],
         "warnings": warnings,
         "scope": (
             "Recorded execution and read coverage only; "

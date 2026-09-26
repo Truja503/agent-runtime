@@ -100,22 +100,42 @@ async def resume_task(
 ) -> TaskResponse:
     try:
         task = await runtime.tasks.get(task_id)
-        if task.status not in {TaskStatus.PAUSED, TaskStatus.STALLED} or task_id in runtime._jobs:
+        resumable = task.status in {TaskStatus.PAUSED, TaskStatus.STALLED} or (
+            task.status == TaskStatus.FAILED and bool((task.result or {}).get("phase_execution"))
+        )
+        if not resumable or task_id in runtime._jobs:
             raise HTTPException(409, "task is not paused/stalled")
         for request_id in (task.result or {}).get("pending_approvals", []):
             ticket = await runtime.approval_status(request_id)
             if ticket and ticket.status == "awaiting_approval":
                 raise HTTPException(409, "operator approval remains pending")
+        saved = task.result or {}
+        if saved.get("phase_execution"):
+            for phase in saved["phase_execution"]["phases"]:
+                for request_id in phase.get("pending_approvals", []):
+                    ticket = await runtime.approval_status(request_id)
+                    if ticket and ticket.status == "awaiting_approval":
+                        raise HTTPException(409, "operator approval remains pending")
+                    phase.setdefault("outstanding", []).append(
+                        f"Prior approval {request_id}: {ticket.status if ticket else 'missing'}; "
+                        "inspect current state; do not replay the request."
+                    )
+                phase["pending_approvals"] = []
+            saved["pending_approvals"] = []
         await runtime.tasks.record_result(
             task_id,
             {
-                **(task.result or {}),
+                **saved,
                 "workflow": (task.result or {}).get("workflow") or {"stage": "recoverable"},
                 "resume_requested": True,
             },
         )
         runtime.broker.cancelled_tasks.discard(task_id)
-        task = await runtime.tasks.transition(task_id, TaskStatus.CREATED)
+        task = (
+            await runtime.tasks.resume_failed_phase(task_id)
+            if task.status == TaskStatus.FAILED
+            else await runtime.tasks.transition(task_id, TaskStatus.CREATED)
+        )
         runtime.schedule_task(task_id)
         return TaskResponse.of(task)
     except TaskNotFoundError:

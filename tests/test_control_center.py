@@ -150,7 +150,7 @@ async def test_schema_is_sent_and_fallback_is_validated(runtime: Runtime) -> Non
     assert fake.captured["temperature"] == 0
     schema = fake.captured["response_format"]["json_schema"]
     assert schema["strict"] is True
-    assert "arguments" in schema["schema"]["properties"]
+    assert "decision" in schema["schema"]["properties"]
     assert schema["schema"]["additionalProperties"] is False
     assert BaseAgent.parse_decision('{"action":"delete_everything"}') is None
 

@@ -68,7 +68,7 @@ class TaskOptions(BaseModel):
             if self.project_framework == "flask":
                 self.acceptance.required_project_toolchain = True
             self.acceptance.required_workers = list(
-                dict.fromkeys([*self.acceptance.required_workers, "coder", "reviewer"])
+                dict.fromkeys([*self.acceptance.required_workers, "reviewer"])
             )
             self.acceptance.required_review_verdict = (
                 self.acceptance.required_review_verdict or "pass_or_warnings"
